@@ -9,8 +9,8 @@ Authors@R: c(
   )
 Description: Reimplementation of beta-binomial regression models from
     PROreg using Template Model Builder (TMB) for automatic differentiation
-    and Laplace approximation. Provides cross-sectional BBreg and
-    infrastructure toward mixed-effects BBmm models.
+    and Laplace approximation. Provides cross-sectional BBreg, mixed-effects
+    BBmm, and a one-stage BB–Weibull joint model (BBjm).
 License: GPL (>= 2)
 Encoding: UTF-8
 LazyData: true

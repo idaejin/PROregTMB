@@ -9,3 +9,4 @@ inst/TMB/*.o
 inst/TMB/*.so
 *.tar.gz
 .DS_Store
+scripts/bench_out/*.log
