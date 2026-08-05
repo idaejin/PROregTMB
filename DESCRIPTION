@@ -1,0 +1,22 @@
+Package: PROregTMB
+Title: Patient Reported Outcomes Regression with TMB
+Version: 0.0.1
+Authors@R: c(
+    person("Dae-Jin", "Lee", role = c("aut", "cre"),
+           email = "dlee@bcamath.org"),
+    person("Josu", "Najera-Zuloaga", role = "aut"),
+    person("Inmaculada", "Arostegui", role = "aut")
+  )
+Description: Reimplementation of beta-binomial regression models from
+    PROreg using Template Model Builder (TMB) for automatic differentiation
+    and Laplace approximation. Provides cross-sectional BBreg and
+    infrastructure toward mixed-effects BBmm models.
+License: GPL (>= 2)
+Encoding: UTF-8
+LazyData: true
+Depends: R (>= 4.0.0)
+Imports: TMB, Matrix, stats, methods
+Suggests: PROreg, testthat (>= 3.0.0), knitr, rmarkdown
+Config/testthat/edition: 3
+RoxygenNote: 7.3.2
+NeedsCompilation: no
