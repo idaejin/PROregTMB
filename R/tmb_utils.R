@@ -28,6 +28,20 @@
   stop("Cannot locate TMB templates for PROregTMB.", call. = FALSE)
 }
 
+# Eigen + -Wall often warns on unused-but-set locals under GCC/Clang.
+.tmb_compile_flags <- function() {
+  cxx <- tryCatch(
+    system2(file.path(R.home("bin"), "R"),
+            c("CMD", "config", "CXX17"),
+            stdout = TRUE, stderr = FALSE),
+    error = function(e) character()
+  )
+  if (length(cxx) && any(grepl("clang|g\\+\\+|gcc", cxx, ignore.case = TRUE))) {
+    return("-Wno-unused-but-set-variable")
+  }
+  ""
+}
+
 #' Ensure a TMB DLL is compiled and loaded
 #' @param name Template basename without extension (e.g. "bb_reg")
 #' @param force Recompile even if already loaded
@@ -53,7 +67,7 @@ ensure_tmb_dll <- function(name, force = FALSE) {
   on.exit(setwd(wd), add = TRUE)
   setwd(work)
 
-  TMB::compile(basename(cpp))
+  TMB::compile(basename(cpp), flags = .tmb_compile_flags())
   dyn.load(TMB::dynlib(name))
   .tmb_env[[name]] <- TRUE
   invisible(name)

@@ -41,6 +41,26 @@ fit <- BBreg(y ~ x, m)
 summary(fit)
 ```
 
+### Mixed model (`BBmm`)
+
+Random-intercept beta-binomial mixed model:
+
+```r
+set.seed(42)
+n_g <- 30; n_per <- 6; m <- 10
+x <- rnorm(n_g * n_per)
+z <- factor(rep(seq_len(n_g), each = n_per))
+u <- rnorm(n_g, 0, 0.8)
+eta <- 0.5 - 0.4 * x + u[z]
+y <- rBB(length(x), m, 1/(1+exp(-eta)), phi = 0.15)
+dat <- data.frame(y, x, z)
+
+fit_mm <- BBmm(y ~ x, random.formula = ~ z, m = m, data = dat)
+summary(fit_mm)
+```
+
+For multiple crossed factors use e.g. `random.formula = ~ site + doc`. For a custom `Z`, pass `Z` and `nRandComp` instead of `random.formula`.
+
 ## Multidimensional BBMM
 
 ```bash
