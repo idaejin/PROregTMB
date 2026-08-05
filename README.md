@@ -26,7 +26,7 @@ For local development without installing:
 devtools::load_all("/path/to/PROregTMB")
 ```
 
-First call to `BBreg()` / `BBmm()` compiles the TMB template (needs a C++ toolchain).
+First call to `BBreg()` / `BBmm()` / `BBjm()` compiles the TMB template (needs a C++ toolchain).
 
 ## Quick example
 
@@ -61,13 +61,16 @@ summary(fit_mm)
 
 For multiple crossed factors use e.g. `random.formula = ~ site + doc`. For a custom `Z`, pass `Z` and `nRandComp` instead of `random.formula`.
 
-## Multidimensional BBMM
+### One-stage joint model (`BBjm`)
 
-```bash
-Rscript scripts/sim_multi_BB.R --quick --nsim=30
+```r
+fit <- BBjm(long, surv, m = 24)  # long: id,time,y; surv: id,time,status
+summary(fit)
 ```
 
-Precomputed benchmarks and joint-model results:
+## Benchmarks and vignette
+
+Precomputed pilot results (multi-RE, TSBB, BBjm vs TSBB, multidimensional BBMM):
 
 ```r
 browseVignettes("PROregTMB")
@@ -75,24 +78,25 @@ browseVignettes("PROregTMB")
 # rmarkdown::render("vignettes/PROregTMB-results.Rmd")
 ```
 
-```r
-fit <- BBjm(long, surv, m = 24)  # long: id,time,y; surv: id,time,status
-summary(fit)
-```
-
-Demo vs two-stage:
-
-```bash
-Rscript scripts/demo_BBjm.R
-```
-
-Pilot comparing TSBB stage-1 engines (`PROreg::BBmm` vs `PROregTMB::BBmm`):
+| Study | Script | Pilot scale | Output |
+|-------|--------|-------------|--------|
+| Multi-RE `BBmm` | `scripts/bench_multi_RE.R` | crossed `~site+doc` | `bench_out/bench_multi_RE.csv` |
+| TSBB stage-1 engines | `scripts/sim_tsbb_galan.R` | N=80, nsim=8 | `tsbb_galan_summary.csv` |
+| BBjm vs TSBB | `scripts/sim_BBjm_vs_TSBB.R` | N=100, nsim=40 | `bbjm_vs_tsbb_summary.csv` |
+| Multidimensional BBMM | `scripts/sim_multi_BB.R` | nsim=30, σ∈{0.5,1} | `multi_BB_summary.csv` |
 
 ```bash
 Rscript scripts/sim_tsbb_galan.R --quick --nsim=8 --N=80
-# full paper grid (slow): omit --quick; default N=250
+Rscript scripts/sim_BBjm_vs_TSBB.R --quick --nsim=40 --N=100
+Rscript scripts/sim_multi_BB.R --quick --nsim=30
+Rscript scripts/demo_BBjm.R
+# full paper grids (slow): omit --quick; see script headers
 ```
 
-Results: `scripts/bench_out/tsbb_galan_summary.csv`
+**Pilot takeaways**
 
-**Note on `BBmm`:** when the random-effect signal is weak (few groups / large \(\phi\)), ML Laplace can shrink \(\sigma\to 0\) while PROreg's adjusted profile h-likelihood keeps a small positive value. With identifiable designs (many groups, smaller \(\phi\)), estimates match closely and TMB is typically faster after the one-time compile.
+- Multi-RE / multi-outcome `BBmm`: estimates close to PROreg; TMB typically **~3–30×** faster after one-time compile.
+- TSBB with TMB stage-1: \(\hat\alpha\) matches PROreg stage-1 (~30–47× faster on the pilot).
+- BBjm vs TSBB (TMB stage-1): similar bias/CP for \(\alpha\); TSBB faster; both 100% conv on the pilot.
+
+**Note on `BBmm`:** when the random-effect signal is weak (few groups / large \(\phi\)), ML Laplace can shrink \(\sigma\to 0\) while PROreg's adjusted profile h-likelihood keeps a small positive value. With identifiable designs (many groups, smaller \(\phi\)), estimates match closely.

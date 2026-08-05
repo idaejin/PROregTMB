@@ -26,12 +26,14 @@ knitr::opts_chunk$set(
 approximation). This vignette summarises numerical experiments comparing:
 
 1. **`BBreg` / `BBmm`** against [PROreg](https://cran.r-project.org/package=PROreg)
+   (including crossed multi-RE and multidimensional outcomes)
 2. A **two-stage joint model (TSBB)** in the spirit of
    Galán-Arcicollar, Najera-Zuloaga & Lee (*SORT*, 2024)
-3. A **one-stage joint model (`BBjm`)** with shared random effects
+3. A **one-stage joint model (`BBjm`)** with shared random effects, vs TSBB
 
 Heavy simulations are **not** re-run here. Precomputed tables ship in
-`inst/extdata/` (also produced by scripts under `scripts/`).
+`inst/extdata/` (also produced by scripts under `scripts/`). Results below are
+**pilots** (smaller \(N\) / \(n_{\mathrm{sim}}\) than the full paper grids).
 
 ```{r load-data}
 extdata <- function(file) {
@@ -53,6 +55,10 @@ bench_re <- read.csv(extdata("bench_multi_RE.csv"))
 tsbb_sum <- read.csv(extdata("tsbb_galan_summary.csv"))
 tsbb_rep <- read.csv(extdata("tsbb_galan_reps.csv"))
 bbjm_demo <- read.csv(extdata("demo_BBjm.csv"))
+bbjm_sum <- read.csv(extdata("bbjm_vs_tsbb_summary.csv"))
+bbjm_rep <- read.csv(extdata("bbjm_vs_tsbb_reps.csv"))
+multi_sum <- read.csv(extdata("multi_BB_summary.csv"))
+multi_rep <- read.csv(extdata("multi_BB_reps.csv"))
 ```
 
 # Models in brief
@@ -198,6 +204,8 @@ Reproduce / extend:
 
 # One-stage joint model (`BBjm`) vs TSBB
 
+## Demo replicate
+
 Single illustrative replicate (Scenario-1-like: \(N=120\), \(m=24\),
 \(\phi=0.5\), \(\alpha=0.05\)).
 
@@ -215,8 +223,7 @@ knitr::kable(
 
 In this run, **`BBjm` recovered \(\hat\alpha \approx 0.051\)** (truth \(0.05\))
 versus TSBB \(\hat\alpha \approx 0.042\), and also estimated the Weibull
-baseline \((w_1,w_2)\). Wall-clock was about **1.4 s** for `BBjm` vs
-**~13 s** for TSBB on the same machine (see `scripts/demo_BBjm.R`).
+baseline \((w_1,w_2)\). See `scripts/demo_BBjm.R`.
 
 ```{r bbjm-usage, eval=FALSE}
 library(PROregTMB)
@@ -226,22 +233,79 @@ fit <- BBjm(long, surv, m = 24)
 summary(fit)
 ```
 
-# How to argue that `BBjm` is better
+## Monte Carlo pilot (`BBjm` vs TSBB)
 
-A fair claim needs a Monte Carlo study (same truth as Galán-Arcicollar et al.):
+Same SORT 2024 design; stage-1 of TSBB uses **`PROregTMB::BBmm`** (so the
+comparison isolates one-stage vs two-stage, not the BB engine).
 
-| Metric for \(\alpha\) | Prefer `BBjm` if… |
-|-----------------------|-------------------|
-| %Bias / RMSE | smaller than TSBB |
-| 95% CP | closer to nominal |
-| % convergence | higher / more stable |
-| Time | secondary |
+**Pilot settings:** \(N=100\), \(n_{\mathrm{sim}}=40\), five \((\phi,\alpha)\)
+cells (Scenario 1 and 2). Script: `scripts/sim_BBjm_vs_TSBB.R`.
 
-`BBjm` is expected to reduce **plug-in bias** of two-stage methods; TSBB may
-remain competitive on speed when stage-1 uses TMB. Report the full
-\((\phi,\alpha)\) grid with large \(n_{\mathrm{sim}}\) before strong conclusions.
+```{r bbjm-mc-table}
+jm_view <- within(bbjm_sum, {
+  pct_bias <- round(pct_bias, 3)
+  RMSE <- round(RMSE, 4)
+  ESD <- round(ESD, 4)
+  CP95 <- round(CP95, 1)
+  time_mean <- round(time_mean, 2)
+  mean_alpha <- round(mean_alpha, 4)
+})
+knitr::kable(
+  jm_view[, c("tag", "method", "alpha_true", "mean_alpha", "pct_bias",
+              "RMSE", "ESD", "CP95", "pct_conv", "time_mean")],
+  col.names = c("Cell", "Method", "α", "Mean α̂", "%Bias", "RMSE", "ESD",
+                "CP95", "%Conv", "Time (s)"),
+  caption = "BBjm vs TSBB pilot: association parameter α."
+)
+```
+
+```{r bbjm-mc-time, fig.cap="Mean fit time by cell (TSBB uses TMB stage-1)."}
+cells <- unique(bbjm_sum$tag)
+ts <- bbjm_sum$time_mean[bbjm_sum$method == "TSBB"]
+jm <- bbjm_sum$time_mean[bbjm_sum$method == "BBjm"]
+op <- par(mar = c(8, 4, 2, 1))
+barplot(
+  rbind(ts, jm),
+  beside = TRUE,
+  names.arg = cells,
+  las = 2,
+  legend.text = c("TSBB (TMB)", "BBjm"),
+  args.legend = list(x = "topright", bty = "n"),
+  ylab = "Mean time (s)",
+  col = c("gray70", "darkorange"),
+  cex.names = 0.7
+)
+par(op)
+```
+
+```{r bbjm-mc-alpha, fig.cap="Replicate-level α̂: TSBB vs BBjm."}
+ok <- complete.cases(bbjm_rep$alpha_tsbb, bbjm_rep$alpha_bbjm)
+plot(bbjm_rep$alpha_tsbb[ok], bbjm_rep$alpha_bbjm[ok],
+     xlab = expression(hat(alpha)[TSBB]),
+     ylab = expression(hat(alpha)[BBjm]),
+     pch = 19, col = adjustcolor("darkorange", 0.55))
+abline(0, 1, lty = 2)
+legend("topleft", bty = "n",
+       legend = sprintf("cor = %.3f",
+                        cor(bbjm_rep$alpha_tsbb[ok], bbjm_rep$alpha_bbjm[ok])))
+```
+
+**Takeaway.** Both methods converged in **100%** of replicates. Bias, RMSE and
+95% CP for \(\alpha\) are **similar** across cells; neither dominates on this
+pilot. With TMB already in stage-1, **TSBB is faster** (~0.2–0.3 s vs ~1.1–1.3 s
+for `BBjm`). One-stage estimation still returns Weibull baseline parameters in
+a single fit. Stronger claims need the full paper grid
+(\(N=250\), \(n_{\mathrm{sim}}\ge 100\)).
+
+Reproduce / extend:
+
+```r
+# Rscript scripts/sim_BBjm_vs_TSBB.R --quick --nsim=40 --N=100
+# Rscript scripts/sim_BBjm_vs_TSBB.R --nsim=100 --N=250
+```
 
 # Multidimensional BBMM (Najera-Zuloaga et al., 2024)
+
 
 Shared random-effects joint analysis of \(L=3\) BB outcomes (Statistical Modelling;
 Table 1):
@@ -255,11 +319,6 @@ u_i\sim N(0,\sigma_u^2).
 Truth: \((\gamma_{0},\gamma_{1},\phi,m)\) =
 \((1,-1.5,0.5,20)\), \((-2,2.5,1,10)\), \((0.5,0.5,1.5,4)\);
 \(x\sim U(0,1)\); \(n=100\). Pilot: \(n_{\mathrm{sim}}=30\), \(\sigma_u\in\{0.5,1\}\).
-
-```{r multi-load}
-multi_sum <- read.csv(extdata("multi_BB_summary.csv"))
-multi_rep <- read.csv(extdata("multi_BB_reps.csv"))
-```
 
 ```{r multi-slopes}
 sl <- multi_sum[multi_sum$param %in% c("g1_1", "g1_2", "g1_3", "sigma"), ]
