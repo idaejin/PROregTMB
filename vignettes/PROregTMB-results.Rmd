@@ -241,6 +241,80 @@ A fair claim needs a Monte Carlo study (same truth as Galán-Arcicollar et al.):
 remain competitive on speed when stage-1 uses TMB. Report the full
 \((\phi,\alpha)\) grid with large \(n_{\mathrm{sim}}\) before strong conclusions.
 
+# Multidimensional BBMM (Najera-Zuloaga et al., 2024)
+
+Shared random-effects joint analysis of \(L=3\) BB outcomes (Statistical Modelling;
+Table 1):
+
+\[
+Y_{il}\mid u_i \sim \mathrm{BB}(m_l,p_{il},\phi_l),\quad
+\operatorname{logit}(p_{il})=\gamma_{0l}+\gamma_{1l}x_i+u_i,\quad
+u_i\sim N(0,\sigma_u^2).
+\]
+
+Truth: \((\gamma_{0},\gamma_{1},\phi,m)\) =
+\((1,-1.5,0.5,20)\), \((-2,2.5,1,10)\), \((0.5,0.5,1.5,4)\);
+\(x\sim U(0,1)\); \(n=100\). Pilot: \(n_{\mathrm{sim}}=30\), \(\sigma_u\in\{0.5,1\}\).
+
+```{r multi-load}
+multi_sum <- read.csv(extdata("multi_BB_summary.csv"))
+multi_rep <- read.csv(extdata("multi_BB_reps.csv"))
+```
+
+```{r multi-slopes}
+sl <- multi_sum[multi_sum$param %in% c("g1_1", "g1_2", "g1_3", "sigma"), ]
+sl_view <- within(sl, {
+  bias <- round(bias, 3)
+  RMSE <- round(RMSE, 3)
+  ESD <- round(ESD, 3)
+  CP95 <- round(CP95, 1)
+  time_mean <- round(time_mean, 2)
+})
+knitr::kable(
+  sl_view[, c("sigma_u", "engine", "param", "true", "bias", "RMSE", "ESD",
+              "CP95", "time_mean")],
+  caption = "Multidimensional BBMM: slopes and shared sigma (PROreg vs TMB)."
+)
+```
+
+```{r multi-time, fig.cap="Multidimensional BBmm wall-clock time."}
+agg <- aggregate(cbind(time_P, time_T) ~ sigma_u, multi_rep, mean)
+op <- par(mar = c(4, 4, 2, 1))
+barplot(
+  rbind(agg$time_P, agg$time_T),
+  beside = TRUE,
+  names.arg = paste0("sigma=", agg$sigma_u),
+  legend.text = c("PROreg", "PROregTMB"),
+  args.legend = list(x = "topright", bty = "n"),
+  ylab = "Mean time (s)",
+  col = c("gray70", "steelblue")
+)
+par(op)
+```
+
+```{r multi-cor}
+ok <- complete.cases(multi_rep$g1_1_P, multi_rep$g1_1_T)
+cat(sprintf(
+  "Replicate correlation of slope g1 (dim 1): %.4f\n",
+  cor(multi_rep$g1_1_P[ok], multi_rep$g1_1_T[ok])
+))
+cat(sprintf(
+  "Mean speedup: %.1fx\n",
+  mean(multi_rep$time_P) / mean(multi_rep$time_T)
+))
+```
+
+**Takeaway.** Both engines recover slopes with similar bias/RMSE/CP; TMB is about
+**30×** faster. Dimension 3 (\(m=4\)) is noisier for both when \(\sigma_u=1\)
+(larger ESD), matching the paper’s caution about extreme shared-RE scenarios.
+
+Reproduce:
+
+```r
+# Rscript scripts/sim_multi_BB.R --quick --nsim=30
+# full: Rscript scripts/sim_multi_BB.R --nsim=100  # sigma in {0.5,1,1.5}
+```
+
 # Session info
 
 ```{r session}

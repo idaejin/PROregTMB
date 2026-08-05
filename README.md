@@ -41,7 +41,11 @@ fit <- BBreg(y ~ x, m)
 summary(fit)
 ```
 
-## Vignette
+## Multidimensional BBMM
+
+```bash
+Rscript scripts/sim_multi_BB.R --quick --nsim=30
+```
 
 Precomputed benchmarks and joint-model results:
 

@@ -16,10 +16,12 @@
 #' @param silent Suppress TMB tracing.
 #' @param control Extra `nlminb` control.
 #' @param start Optional named list of starting values.
+#' @param use_bbmm_start If `TRUE` (default), warm-start from a `BBmm` fit.
 #' @return Object of class `BBjm`.
 #' @export
 BBjm <- function(long, surv, m, n_quad = 40L, maxiter = 200,
-                 silent = TRUE, control = list(), start = list()) {
+                 silent = TRUE, control = list(), start = list(),
+                 use_bbmm_start = TRUE) {
   need <- c("id", "time", "y")
   if (!all(need %in% names(long))) {
     stop("long must have columns: id, time, y", call. = FALSE)
@@ -56,16 +58,19 @@ BBjm <- function(long, surv, m, n_quad = 40L, maxiter = 200,
 
   ensure_tmb_dll("bb_jm")
 
-  # Starting values from two-stage-ish warm start: BBmm then rough alpha
-  zz0 <- model.matrix(~ long$id - 1)
-  zz1 <- zz0 * as.numeric(long$time)
-  Z <- cbind(zz0, zz1)
-  X <- model.matrix(~ time, data = long)
-  bb0 <- tryCatch(
-    BBmm(X = X, y = as.numeric(long$y), Z = Z,
-         nRandComp = c(n_subj, n_subj), m = m, silent = TRUE),
-    error = function(e) NULL
-  )
+  # Starting values
+  bb0 <- NULL
+  if (isTRUE(use_bbmm_start)) {
+    zz0 <- model.matrix(~ long$id - 1)
+    zz1 <- zz0 * as.numeric(long$time)
+    Z <- cbind(zz0, zz1)
+    X <- model.matrix(~ time, data = long)
+    bb0 <- tryCatch(
+      BBmm(X = X, y = as.numeric(long$y), Z = Z,
+           nRandComp = c(n_subj, n_subj), m = m, silent = TRUE),
+      error = function(e) NULL
+    )
+  }
 
   if (!is.null(bb0) && identical(bb0$conv, "yes")) {
     beta0 <- as.numeric(bb0$fixed.coef)
