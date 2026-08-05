@@ -10,3 +10,6 @@ inst/TMB/*.so
 *.tar.gz
 .DS_Store
 scripts/bench_out/*.log
+vignettes/*.html
+vignettes/*_files/
+vignettes/*.R

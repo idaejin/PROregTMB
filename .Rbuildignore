@@ -1,0 +1,5 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^scripts/bench_out/.*\.log$
+^vignettes/.*\.html$
+^vignettes/.*\.R$

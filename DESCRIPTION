@@ -16,7 +16,8 @@ Encoding: UTF-8
 LazyData: true
 Depends: R (>= 4.0.0)
 Imports: TMB, Matrix, stats, methods
-Suggests: PROreg, testthat (>= 3.0.0), knitr, rmarkdown
+Suggests: PROreg, testthat (>= 3.0.0), knitr, rmarkdown, survival
 Config/testthat/edition: 3
+VignetteBuilder: knitr
 RoxygenNote: 7.3.2
 NeedsCompilation: no

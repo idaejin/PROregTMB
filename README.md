@@ -41,7 +41,15 @@ fit <- BBreg(y ~ x, m)
 summary(fit)
 ```
 
-## One-stage joint model
+## Vignette
+
+Precomputed benchmarks and joint-model results:
+
+```r
+browseVignettes("PROregTMB")
+# or from source:
+# rmarkdown::render("vignettes/PROregTMB-results.Rmd")
+```
 
 ```r
 fit <- BBjm(long, surv, m = 24)  # long: id,time,y; surv: id,time,status

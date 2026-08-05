@@ -1,0 +1,248 @@
+---
+title: "PROregTMB: benchmarks and joint-model results"
+author: "Dae-Jin Lee"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{PROregTMB: benchmarks and joint-model results}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4.2,
+  dpi = 120
+)
+```
+
+# Overview
+
+**PROregTMB** reimplements beta-binomial PRO regression with
+[TMB](https://github.com/kaskr/adcomp) (automatic differentiation + Laplace
+approximation). This vignette summarises numerical experiments comparing:
+
+1. **`BBreg` / `BBmm`** against [PROreg](https://cran.r-project.org/package=PROreg)
+2. A **two-stage joint model (TSBB)** in the spirit of
+   Galán-Arcicollar, Najera-Zuloaga & Lee (*SORT*, 2024)
+3. A **one-stage joint model (`BBjm`)** with shared random effects
+
+Heavy simulations are **not** re-run here. Precomputed tables ship in
+`inst/extdata/` (also produced by scripts under `scripts/`).
+
+```{r load-data}
+extdata <- function(file) {
+  # installed package
+  p <- system.file("extdata", file, package = "PROregTMB")
+  if (nzchar(p) && file.exists(p)) return(p)
+  # knitr from vignettes/ or package root
+  for (cand in c(
+    file.path("inst", "extdata", file),
+    file.path("..", "inst", "extdata", file),
+    file.path("extdata", file)
+  )) {
+    if (file.exists(cand)) return(cand)
+  }
+  stop("Cannot find extdata file: ", file, call. = FALSE)
+}
+
+bench_re <- read.csv(extdata("bench_multi_RE.csv"))
+tsbb_sum <- read.csv(extdata("tsbb_galan_summary.csv"))
+tsbb_rep <- read.csv(extdata("tsbb_galan_reps.csv"))
+bbjm_demo <- read.csv(extdata("demo_BBjm.csv"))
+```
+
+# Models in brief
+
+| Function | Role |
+|----------|------|
+| `BBreg` | Marginal BB logistic regression (no RE) |
+| `BBmm` | BB mixed model, Gaussian RE, Laplace |
+| `BBjm` | One-stage BB + Weibull PH joint model |
+
+**Longitudinal BB mixed model**
+
+\[
+y_{ij}\mid u_i \sim \mathrm{BB}(m,p_{ij},\phi),\quad
+\operatorname{logit}(p_{ij}) = x_{ij}^\top\beta + z_{ij}^\top u_i.
+\]
+
+**One-stage joint model (`BBjm`)** — shared RI/RS, current-value association:
+
+\[
+\operatorname{logit}(p_{ij})=(\beta_0+u_{i0})+(\beta_1+u_{i1})t_{ij},
+\]
+\[
+m_i(t)=m\cdot\operatorname{logit}^{-1}\big((\beta_0+u_{i0})+(\beta_1+u_{i1})t\big),
+\]
+\[
+h_i(t)=w_1 w_2 t^{w_2-1}\exp\{\alpha\, m_i(t)\}.
+\]
+
+**Two-stage TSBB** fits `BBmm`, plugs \(\hat m_i(t)\) into `survival::coxph`.
+
+# Multi random-effect timing (`BBmm`)
+
+Crossed random effects `~ site + doc` (two variance components). Same data for
+PROreg and PROregTMB; times are means of 3 replicates after TMB warm-up compile.
+
+```{r bench-re-table}
+tab_re <- data.frame(
+  Scenario = bench_re$scenario,
+  n = bench_re$n,
+  n_RE = bench_re$n_re,
+  PROreg_s = round(bench_re$time_proreg_mean, 3),
+  TMB_s = round(bench_re$time_tmb_mean, 3),
+  Speedup = round(bench_re$speedup, 2),
+  cor_u = round(bench_re$cor_u, 4),
+  sigma_site_P = round(bench_re$proreg_sigma_site, 3),
+  sigma_site_T = round(bench_re$tmb_sigma_site, 3),
+  sigma_doc_P = round(bench_re$proreg_sigma_doc, 3),
+  sigma_doc_T = round(bench_re$tmb_sigma_doc, 3)
+)
+knitr::kable(tab_re, caption = "Multi-RE benchmark: timings and selected estimates.")
+```
+
+```{r bench-re-plot, fig.cap="Wall-clock time for BBmm with two RE components."}
+op <- par(mar = c(5, 4, 2, 1))
+barplot(
+  rbind(bench_re$time_proreg_mean, bench_re$time_tmb_mean),
+  beside = TRUE,
+  names.arg = bench_re$scenario,
+  legend.text = c("PROreg", "PROregTMB"),
+  args.legend = list(x = "topleft", bty = "n"),
+  ylab = "Mean elapsed time (s)",
+  col = c("gray70", "steelblue")
+)
+par(op)
+```
+
+**Takeaway.** Estimates agree closely (`cor(û) ≥ 0.998`). Speedup grows with
+problem size, from about **3×** (n = 150) to **17×** (n = 1920, 280 RE).
+
+# Two-stage joint model pilot (TSBB)
+
+Design follows Galán-Arcicollar et al. (*SORT* 2024, Sec. 6): visits at
+\(0,1,2,5\); Weibull baseline \((w_1,w_2)=(0.1,1.6)\); random intercept and
+slope; association parameter \(\alpha\).
+
+**Pilot settings (not the full paper grid):** \(N=80\), \(n_{\mathrm{sim}}=8\),
+four representative \((\phi,\alpha)\) cells. Stage-1 engine is either
+`PROreg::BBmm` or `PROregTMB::BBmm`; stage-2 `coxph` is identical.
+
+```{r tsbb-table}
+tsbb_view <- within(tsbb_sum, {
+  pct_bias <- round(pct_bias, 3)
+  ESD <- round(ESD, 4)
+  CP95 <- round(CP95, 1)
+  time_mean <- round(time_mean, 2)
+  speedup <- round(speedup, 1)
+  mean_alpha <- round(mean_alpha, 4)
+})
+knitr::kable(
+  tsbb_view[, c("tag", "engine", "alpha_true", "mean_alpha", "pct_bias",
+                "ESD", "CP95", "pct_conv", "time_mean", "speedup")],
+  col.names = c("Cell", "Engine", "α", "Mean α̂", "%Bias", "ESD", "CP95",
+                "%Conv", "Time (s)", "Speedup"),
+  caption = "TSBB pilot: association parameter α."
+)
+```
+
+```{r tsbb-time-plot, fig.cap="TSBB full-pipeline time by cell and engine."}
+cells <- unique(tsbb_sum$tag)
+P <- tsbb_sum$time_mean[tsbb_sum$engine == "PROreg"]
+Tm <- tsbb_sum$time_mean[tsbb_sum$engine == "PROregTMB"]
+op <- par(mar = c(8, 4, 2, 1))
+barplot(
+  rbind(P, Tm),
+  beside = TRUE,
+  names.arg = cells,
+  las = 2,
+  legend.text = c("PROreg", "PROregTMB"),
+  args.legend = list(x = "topright", bty = "n"),
+  ylab = "Mean time (s)",
+  col = c("gray70", "steelblue"),
+  cex.names = 0.75
+)
+par(op)
+```
+
+```{r tsbb-alpha-scatter, fig.cap="Replicate-level agreement of α̂ (PROreg vs PROregTMB)."}
+ok <- complete.cases(tsbb_rep$alpha_proreg, tsbb_rep$alpha_tmb)
+plot(tsbb_rep$alpha_proreg[ok], tsbb_rep$alpha_tmb[ok],
+     xlab = expression(hat(alpha)[PROreg]),
+     ylab = expression(hat(alpha)[TMB]),
+     pch = 19, col = adjustcolor("steelblue", 0.7))
+abline(0, 1, lty = 2)
+legend("topleft", bty = "n",
+       legend = sprintf("cor = %.3f", cor(tsbb_rep$alpha_proreg[ok],
+                                          tsbb_rep$alpha_tmb[ok])))
+```
+
+**Takeaway.** On this pilot, PROregTMB recovers essentially the same \(\hat\alpha\)
+as PROreg (replicate correlation \(\approx 0.99\)) with about **30–47×** lower
+wall-clock time. Coverage and ESD are comparable; `%Bias` for very small
+\(\alpha\) is noisy at \(n_{\mathrm{sim}}=8\).
+
+Reproduce / extend:
+
+```r
+# quick pilot
+# Rscript scripts/sim_tsbb_galan.R --quick --nsim=8 --N=80
+# full paper grid (slow with PROreg):
+# Rscript scripts/sim_tsbb_galan.R --nsim=200 --N=250
+```
+
+# One-stage joint model (`BBjm`) vs TSBB
+
+Single illustrative replicate (Scenario-1-like: \(N=120\), \(m=24\),
+\(\phi=0.5\), \(\alpha=0.05\)).
+
+```{r bbjm-table}
+knitr::kable(
+  within(bbjm_demo, {
+    true <- round(true, 4)
+    TSBB <- round(TSBB, 4)
+    BBjm <- round(BBjm, 4)
+    diff_jm_ts <- round(diff_jm_ts, 4)
+  }),
+  caption = "One replicate: TSBB (PROregTMB::BBmm + coxph) vs BBjm."
+)
+```
+
+In this run, **`BBjm` recovered \(\hat\alpha \approx 0.051\)** (truth \(0.05\))
+versus TSBB \(\hat\alpha \approx 0.042\), and also estimated the Weibull
+baseline \((w_1,w_2)\). Wall-clock was about **1.4 s** for `BBjm` vs
+**~13 s** for TSBB on the same machine (see `scripts/demo_BBjm.R`).
+
+```{r bbjm-usage, eval=FALSE}
+library(PROregTMB)
+# long: id, time, y
+# surv: id, time, status (1 = event)
+fit <- BBjm(long, surv, m = 24)
+summary(fit)
+```
+
+# How to argue that `BBjm` is better
+
+A fair claim needs a Monte Carlo study (same truth as Galán-Arcicollar et al.):
+
+| Metric for \(\alpha\) | Prefer `BBjm` if… |
+|-----------------------|-------------------|
+| %Bias / RMSE | smaller than TSBB |
+| 95% CP | closer to nominal |
+| % convergence | higher / more stable |
+| Time | secondary |
+
+`BBjm` is expected to reduce **plug-in bias** of two-stage methods; TSBB may
+remain competitive on speed when stage-1 uses TMB. Report the full
+\((\phi,\alpha)\) grid with large \(n_{\mathrm{sim}}\) before strong conclusions.
+
+# Session info
+
+```{r session}
+sessionInfo()
+```
