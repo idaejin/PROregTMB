@@ -63,9 +63,30 @@ For multiple crossed factors use e.g. `random.formula = ~ site + doc`. For a cus
 
 ### One-stage joint model (`BBjm`)
 
+Shared RI/RS beta-binomial longitudinal model + Weibull PH survival with
+current-value association \(\alpha\, m_i(t)\).
+
 ```r
-fit <- BBjm(long, surv, m = 24)  # long: id,time,y; surv: id,time,status
-summary(fit)
+# long: id, time, y (BB score); surv: id, time, status (1 = event)
+fit_jm <- BBjm(long, surv, m = 30)
+summary(fit_jm)
+```
+
+**COPD application (St George ACTIVITY + incident fall).** Time in days since
+baseline; ACTIVITY binned to 0–24 (`m = 30`); exclude baseline falls.
+On N = 506 (110 events): \(\hat\alpha \approx 0.089\) (SE 0.019, p < 0.001) —
+higher predicted activity limitation is associated with higher fall hazard.
+Two-stage TSBB on the same data gave \(\hat\alpha \approx 0.085\).
+
+Sketch of the data prep used in that analysis:
+
+```r
+# COPD has columns id, date, time (visit), ACTIVITY, fall (1 = fall, 2 = no)
+# y <- activity_bin(ACTIVITY)          # 0..24
+# long <- data.frame(id, time = days_since_baseline, y)
+# surv <- one row per id: time to first post-baseline fall (or censor), status
+fit_jm <- BBjm(long, surv, m = 30)
+# compare: stage-1 BBmm + survival::coxph counting process (TSBB)
 ```
 
 ## Benchmarks and vignette
