@@ -11,17 +11,19 @@ Description: Reimplementation of beta-binomial regression models from
     PROreg using Template Model Builder (TMB) for automatic differentiation
     and Laplace approximation. Provides cross-sectional BBreg, mixed-effects
     BBmm (including multivariate shared latent and additive P-splines), and
-    a one-stage BB–Weibull joint model (BBjm).
+    a one-stage BB–Weibull joint model (BBjm). Uses Rcpp for BB simulation /
+    log-density and Matrix for sparse RE designs and smooth SE.
 License: GPL (>= 2)
 Encoding: UTF-8
 LazyData: true
 Depends: R (>= 4.0.0)
-Imports: TMB, Matrix, stats, methods, splines
+Imports: TMB, Matrix, stats, methods, splines, Rcpp
 Suggests: PROreg, testthat (>= 3.0.0), knitr, rmarkdown, survival,
     tmbstan, rstan
+LinkingTo: Rcpp
 Config/testthat/edition: 3
 VignetteBuilder: knitr
 RoxygenNote: 7.3.2
-NeedsCompilation: no
+NeedsCompilation: yes
 URL: https://github.com/idaejin/PROregTMB
 BugReports: https://github.com/idaejin/PROregTMB/issues

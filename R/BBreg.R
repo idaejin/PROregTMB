@@ -141,22 +141,11 @@ BBreg <- function(formula, m, data = list(),
       fhat[[j]] <- as.numeric(sm$specs[[j]]$B %*% alpha[idx])
     }
     names(fhat) <- sm$labels
-    # Joint cov of random effects (Bayesian / Laplace)
-    if (!is.null(sdr) && !is.null(sdr$jointPrecision)) {
-      Jp <- as.matrix(sdr$jointPrecision)
-      rn <- colnames(Jp)
-      a_idx <- which(rn == "alpha" | grepl("^alpha", rn))
-      if (!length(a_idx) && length(obj$env$random)) {
-        # names often just "alpha" repeated or indexed
-        a_idx <- grep("alpha", rn)
-      }
-      if (length(a_idx) == length(alpha)) {
-        alpha.vcov <- tryCatch(
-          solve(Jp[a_idx, a_idx, drop = FALSE]),
-          error = function(e) NULL
-        )
-      }
-    }
+    alpha.vcov <- .alpha_vcov_from_joint(
+      if (!is.null(sdr)) sdr$jointPrecision else NULL,
+      n_alpha = length(alpha),
+      n_u = 0L
+    )
   }
 
   if (!is.null(sdr)) {

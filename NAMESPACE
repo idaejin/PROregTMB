@@ -1,7 +1,10 @@
 # Generated manually for prototype; switch to roxygen later.
 
+useDynLib(PROregTMB, .registration = TRUE)
+
 export(dBB)
 export(rBB)
+export(ldBB)
 export(BBreg)
 export(BBest)
 export(BBmm)
@@ -38,6 +41,7 @@ importFrom(stats, model.frame, model.matrix, model.response, nlminb,
            qlogis, terms, reformulate, qnorm)
 importFrom(TMB, MakeADFun, sdreport, compile)
 importFrom(utils, modifyList)
-importFrom(methods, is)
-importFrom(Matrix, bdiag)
+importFrom(methods, is, as)
+importFrom(Matrix, bdiag, sparseMatrix, Matrix)
 importFrom(splines, splineDesign)
+importFrom(Rcpp, evalCpp)

@@ -13,6 +13,7 @@ Reimplementation of [PROreg](https://cran.r-project.org/package=PROreg) beta-bin
 | Multidimensional `BBmm` (shared latent) | done (`cbind` / `dim=`) |
 | `BBjm` one-stage joint (BB + Weibull) | done (TMB) |
 | Additive P-splines `s(x, ndx, pord)` | done (`BBreg` / `BBmm`) |
+| Rcpp `rBB` / `ldBB` + sparse `Z` / smooth SE | done |
 
 ## Install
 

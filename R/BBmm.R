@@ -251,7 +251,7 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
       y = y,
       m = m.,
       X = X,
-      Z = Z,
+      Z = .as_dense_Z(Z),
       dim_id = as.integer(dim_id),
       nDim = nDim,
       n_blocks = as.integer(re$n_blocks),
@@ -348,17 +348,11 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
       as.numeric(sm$specs[[j]]$B %*% alpha[idx])
     })
     names(fhat) <- sm$labels
-    if (!is.null(sdr) && !is.null(sdr$jointPrecision)) {
-      Jp <- as.matrix(sdr$jointPrecision)
-      rn <- colnames(Jp)
-      a_idx <- grep("alpha", rn)
-      if (length(a_idx) == length(alpha)) {
-        alpha.vcov <- tryCatch(
-          solve(Jp[a_idx, a_idx, drop = FALSE]),
-          error = function(e) NULL
-        )
-      }
-    }
+    alpha.vcov <- .alpha_vcov_from_joint(
+      if (!is.null(sdr)) sdr$jointPrecision else NULL,
+      n_alpha = n_alpha,
+      n_u = nRand
+    )
   }
 
   fixed.vcov <- matrix(NA_real_, length(beta), length(beta),
@@ -378,7 +372,7 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
     if (length(phi_idx)) psi.var <- diag(covf)[phi_idx]
   }
 
-  eta <- as.numeric(X %*% beta + Z %*% u_hat)
+  eta <- as.numeric(X %*% beta + as.numeric(Z %*% u_hat))
   if (isTRUE(sm$n_smooth > 0L)) eta <- eta + as.numeric(sm$B %*% alpha)
   fitted <- 1 / (1 + exp(-eta))
 

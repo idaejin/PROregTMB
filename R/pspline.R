@@ -302,7 +302,7 @@ predict_smooth <- function(object, which = 1L, x = NULL, level = 0.95) {
     Vj <- object$alpha.vcov[idx, idx, drop = FALSE]
   }
   if (!is.null(Vj) && all(is.finite(Vj))) {
-    se <- sqrt(pmax(0, rowSums((Bg %*% Vj) * Bg)))
+    se <- as.numeric(smooth_se_cpp(Bg, Vj))
     z <- stats::qnorm(1 - (1 - level) / 2)
     out$se <- se
     out$lwr <- f - z * se

@@ -12,19 +12,12 @@ dBB <- function(m, p, phi) {
   if (m != as.integer(m) || m <= 0) stop("m must be a positive integer", call. = FALSE)
   if (p < 0 || p > 1) stop("p must be in [0, 1]", call. = FALSE)
   if (phi <= 0) stop("phi must be positive", call. = FALSE)
-
-  tt <- seq.int(0L, m)
-  # Log-space for numerical stability
-  a <- p / phi
-  b <- (1 - p) / phi
-  log_pmf <- lgamma(m + 1) - lgamma(tt + 1) - lgamma(m - tt + 1) +
-    lgamma(a + tt) - lgamma(a) +
-    lgamma(b + m - tt) - lgamma(b) +
-    lgamma(a + b) - lgamma(a + b + m)
-  exp(log_pmf)
+  as.numeric(dBB_cpp(as.integer(m), as.numeric(p), as.numeric(phi)))
 }
 
 #' Random generation from the beta-binomial distribution
+#'
+#' Implemented in Rcpp for large `k` (simulations / benchmarks).
 #'
 #' @param k Number of draws.
 #' @param m Maximum score (scalar or length-k).
@@ -39,9 +32,21 @@ rBB <- function(k, m, p, phi) {
   if (min(m) <= 0 || any(m != as.integer(m))) stop("m must be positive integer(s)", call. = FALSE)
   if (length(m) > 1L && length(m) < k) stop("m must be scalar or length k", call. = FALSE)
   if (length(p) > 1L && length(p) < k) stop("p must be scalar or length k", call. = FALSE)
+  as.integer(rBB_cpp(as.integer(k), as.numeric(m), as.numeric(p), as.numeric(phi)[1]))
+}
 
-  alpha <- p / phi
-  beta <- (1 - p) / phi
-  u <- rbeta(k, alpha, beta)
-  rbinom(k, m, u)
+#' Pointwise beta-binomial log-PMF (Rcpp)
+#'
+#' @param y Counts.
+#' @param m Maximum scores (scalar or length `y`).
+#' @param p Probabilities (scalar or length `y`).
+#' @param phi Dispersion (scalar or length `y`).
+#' @return Numeric vector of log-probabilities.
+#' @export
+ldBB <- function(y, m, p, phi) {
+  y <- as.numeric(y)
+  m <- as.numeric(m)
+  p <- as.numeric(p)
+  phi <- as.numeric(phi)
+  as.numeric(ldbb_cpp(y, m, p, phi))
 }

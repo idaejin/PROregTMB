@@ -104,7 +104,7 @@
   NULL
 }
 
-#' Build Z columns for one (lhs | group) term, interleaved by group
+#' Build Z columns for one (lhs | group) term, interleaved by group (sparse)
 #' @keywords internal
 .make_Z_bar <- function(lhs, group_fac, data, term_names = NULL) {
   group_fac <- droplevels(as.factor(group_fac))
@@ -114,17 +114,33 @@
   q <- ncol(mm)
   if (is.null(term_names)) term_names <- colnames(mm)
   n <- nrow(mm)
-  Z <- matrix(0, n, G * q)
-  cn <- character(G * q)
-  for (g in seq_len(G)) {
-    rows <- which(group_fac == lev[g])
-    for (t in seq_len(q)) {
-      col <- (g - 1L) * q + t
-      Z[rows, col] <- mm[rows, t]
-      cn[col] <- paste0(lev[g], ":", term_names[t])
+  g_id <- as.integer(group_fac)
+  # Sparse COO: for each obs i, term t -> column (g-1)*q + t
+  i_idx <- integer(n * q)
+  j_idx <- integer(n * q)
+  x_val <- numeric(n * q)
+  pos <- 1L
+  for (t in seq_len(q)) {
+    for (i in seq_len(n)) {
+      i_idx[pos] <- i
+      j_idx[pos] <- (g_id[i] - 1L) * q + t
+      x_val[pos] <- mm[i, t]
+      pos <- pos + 1L
     }
   }
-  colnames(Z) <- cn
+  Z <- Matrix::sparseMatrix(
+    i = i_idx, j = j_idx, x = x_val,
+    dims = c(n, G * q),
+    dimnames = list(NULL, {
+      cn <- character(G * q)
+      for (g in seq_len(G)) {
+        for (t in seq_len(q)) {
+          cn[(g - 1L) * q + t] <- paste0(lev[g], ":", term_names[t])
+        }
+      }
+      cn
+    })
+  )
   list(Z = Z, G = G, q = q, term_names = term_names, group_levels = lev,
        group_name = NULL)
 }
@@ -267,6 +283,7 @@
       gname <- names(random.mf)[i]
       Zi <- stats::model.matrix(~ gfac - 1)
       colnames(Zi) <- paste0(gname, levels(as.factor(gfac)))
+      Zi <- Matrix::Matrix(Zi, sparse = TRUE)
       blocks[[i]] <- list(
         name = gname, G = ncol(Zi), q = 1L, corr = "diag",
         term_names = "(Intercept)",
@@ -280,6 +297,10 @@
   }
 
   Z <- do.call(cbind, Z_list)
+  if (inherits(Z, "Matrix")) {
+    # ensure dgCMatrix
+    Z <- methods::as(Z, "dgCMatrix")
+  }
   if (nrow(Z) != nObs) stop("nrow(Z) must equal length(y)", call. = FALSE)
 
   n_blocks <- length(blocks)
