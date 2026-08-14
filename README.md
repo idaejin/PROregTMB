@@ -12,6 +12,7 @@ Reimplementation of [PROreg](https://cran.r-project.org/package=PROreg) beta-bin
 | `BBmm` (mixed effects + Laplace) | done (TMB) |
 | Multidimensional `BBmm` (shared latent) | done (`cbind` / `dim=`) |
 | `BBjm` one-stage joint (BB + Weibull) | done (TMB) |
+| Additive P-splines `s(x, ndx, pord)` | done (`BBreg` / `BBmm`) |
 
 ## Install
 
@@ -112,6 +113,31 @@ BBmm(
 
 Advanced manual stacking remains available via `multi_bb_stack()` (not the preferred interface).
 
+### Additive P-splines (Eilers–Marx + sum-to-zero)
+
+On the logit scale:
+
+\[
+\operatorname{logit}(p)=X\beta+\sum_j f_j(x_j),\quad
+f_j=B_j\gamma_j,
+\]
+
+with penalty \(\lambda_j\|D_{\mathrm{pord}}\gamma_j\|^2\) plus the centering
+term \(\kappa\|1^\top B_j\gamma_j\|^2\) (so \(\sum_i \hat f_j(x_{ij})\approx 0\)),
+as in the additive P-spline notes. Notation follows Eilers: `ndx`, `pord`, `bdeg`.
+
+```r
+fit_add <- BBreg(
+  y ~ z + s(age, ndx = 12, pord = 2) + s(bmi, ndx = 10),
+  m = m, data = dat
+)
+fit_add$lambda
+sum(fit_add$fhat[["s(age)"]])   # ~ 0
+predict_smooth(fit_add, which = 1, x = seq(...))  # optional bands
+
+BBmm(y ~ s(time, ndx = 10), random = ~ (1 | id), m = m, data = dat)
+```
+
 **Parameter names (math ↔ object)**
 
 | Model | Math | Primary fields | PROreg-compatible aliases |
@@ -147,15 +173,28 @@ fit_jm <- BBjm(long, surv, m = 30)
 # compare: stage-1 BBmm + survival::coxph counting process (TSBB)
 ```
 
-## Benchmarks and vignette
-
-Precomputed pilot results (multi-RE, TSBB, BBjm vs TSBB, multidimensional BBMM):
+## Vignettes
 
 ```r
 browseVignettes("PROregTMB")
-# or from source:
-# rmarkdown::render("vignettes/PROregTMB-results.Rmd")
 ```
+
+| Vignette | Content |
+|----------|---------|
+| Getting started | `dBB` / `rBB`, `BBest`, `BBreg` |
+| Mixed and multivariate | RI, RI+RS, `cbind` / `dim=` |
+| Additive P-splines | `s(x, ndx, pord)`, `predict_smooth` |
+| Benchmarks and joint-model results | Precomputed pilots (PROreg, TSBB, `BBjm`) |
+
+From source:
+
+```r
+devtools::build_vignettes()
+# or:
+# rmarkdown::render("vignettes/PROregTMB-intro.Rmd")
+```
+
+## Benchmarks and simulation scripts
 
 | Study | Script | Pilot scale | Output |
 |-------|--------|-------------|--------|

@@ -31,6 +31,9 @@ approximation). This vignette summarises numerical experiments comparing:
    Galán-Arcicollar, Najera-Zuloaga & Lee (*SORT*, 2024)
 3. A **one-stage joint model (`BBjm`)** with shared random effects, vs TSBB
 
+For worked examples of the fitting functions, see the vignettes
+*Getting started*, *Mixed and multivariate models*, and *Additive P-splines*.
+
 Heavy simulations are **not** re-run here. Precomputed tables ship in
 `inst/extdata/` (also produced by scripts under `scripts/`). Results below are
 **pilots** (smaller \(N\) / \(n_{\mathrm{sim}}\) than the full paper grids).

@@ -2,17 +2,21 @@
 #'
 #' Model
 #' \deqn{y_i \sim \mathrm{BB}(m_i, p_i, \phi),\quad
-#' \mathrm{logit}(p_i) = x_i^\top\beta}
-#' estimated by Template Model Builder.
+#' \mathrm{logit}(p_i) = x_i^\top\beta + \sum_j f_j(x_{ij})}
+#' with optional additive P-splines \eqn{f_j = B_j\gamma_j} (Eilers–Marx
+#' difference penalty plus sum-to-zero via
+#' \eqn{\kappa(B_j^\top 1)(1^\top B_j)}).
 #'
-#' @param formula Model formula for the mean (logit link).
+#' @param formula Model formula for the mean (logit link). Use
+#'   \code{s(x, ndx, pord)} for smooths.
 #' @param m Maximum score (scalar or vector of length n).
 #' @param data Optional data frame.
 #' @param method `"mle"` (default): maximize the TMB likelihood with
 #'   `nlminb`. `"bayes"`: same point fit, then NUTS via
 #'   [tmbstan::tmbstan()] on a template with weak priors
-#'   \eqn{\beta_j\sim N(0,5^2)}, \eqn{\log\phi\sim N(\log 0.3,1)}
-#'   (requires suggested packages **tmbstan** and **rstan**).
+#'   (parametric models only; no `s()` yet).
+#' @param kappa Weight for soft sum-to-zero
+#'   \eqn{\tfrac12\kappa(\sum_i f_j(x_{ij}))^2} (default `1e6`).
 #' @param maxiter Maximum `nlminb` iterations.
 #' @param control Passed to [stats::nlminb()].
 #' @param silent Suppress TMB tracing.
@@ -23,6 +27,7 @@
 #' @export
 BBreg <- function(formula, m, data = list(),
                   method = c("mle", "bayes"),
+                  kappa = 1e6,
                   maxiter = 100, control = list(), silent = TRUE,
                   chains = 2L, iter = 1000L, warmup = 400L, seed = 1L) {
   method <- match.arg(method)
@@ -30,10 +35,22 @@ BBreg <- function(formula, m, data = list(),
     stop("m must be positive integer(s)", call. = FALSE)
   }
 
-  mf <- model.frame(formula = formula, data = data)
+  empty_data <- is.null(data) || (is.list(data) && !is.data.frame(data) && !length(data))
+  if (!empty_data) data <- as.data.frame(data)
+
+  sm <- .build_smooth_design(formula, data = if (empty_data) NULL else data,
+                             envir = parent.frame())
+  mf <- if (empty_data) {
+    model.frame(formula = sm$fixed, data = parent.frame())
+  } else {
+    model.frame(formula = sm$fixed, data = data)
+  }
   X <- model.matrix(attr(mf, "terms"), data = mf)
   y <- as.numeric(model.response(mf))
   n <- length(y)
+  if (sm$n_smooth > 0L && nrow(sm$B) != n) {
+    stop("smooth design nrow does not match response length", call. = FALSE)
+  }
 
   if (length(m) == 1L) {
     balanced <- "yes"
@@ -47,29 +64,40 @@ BBreg <- function(formula, m, data = list(),
   if (any(y != as.integer(y))) stop("y must be integer", call. = FALSE)
   if (any(y < 0 | y > m.)) stop("y must be bounded between 0 and m", call. = FALSE)
 
+  if (identical(method, "bayes") && sm$n_smooth > 0L) {
+    stop('method = "bayes" does not support s() smooths yet', call. = FALSE)
+  }
+
   ensure_tmb_dll("bb_reg")
 
-  # Starting values: binomial GLM + moment phi
+  # Starting values: binomial GLM on parametric part + moment phi
   glm0 <- stats::glm.fit(X, y / m., family = stats::binomial(), weights = m.)
   beta0 <- as.numeric(glm0$coefficients)
   beta0[!is.finite(beta0)] <- 0
-  p0 <- as.numeric(glm0$fitted.values)
-  p0 <- pmin(pmax(p0, 1e-4), 1 - 1e-4)
   mu <- mean(y)
   v <- stats::var(y)
   mbar <- mean(m.)
-  # Simpler MM matching PROreg spirit
   phi_mm2 <- {
-    ph <- (v - mu * (1 - mu / mbar)) / (mu * (1 - mu / mbar) * (mbar - 1) - (v - mu * (1 - mu / mbar)))
+    ph <- (v - mu * (1 - mu / mbar)) /
+      (mu * (1 - mu / mbar) * (mbar - 1) - (v - mu * (1 - mu / mbar)))
     if (!is.finite(ph) || ph <= 0) 0.5 else ph
   }
 
-  parameters <- list(beta = beta0, log_phi = log(max(phi_mm2, 1e-3)))
-  data_tmb <- list(y = y, m = m., X = X)
+  spar <- .tmb_smooth_parameters(sm)
+  parameters <- c(
+    list(beta = beta0, log_phi = log(max(phi_mm2, 1e-3))),
+    spar
+  )
+  data_tmb <- c(
+    list(y = y, m = m., X = X),
+    .tmb_smooth_data(sm, n = n, kappa = kappa)
+  )
 
+  random <- if (sm$n_smooth > 0L) "alpha" else NULL
   obj <- TMB::MakeADFun(
     data = data_tmb,
     parameters = parameters,
+    random = random,
     DLL = "bb_reg",
     silent = silent
   )
@@ -85,13 +113,51 @@ BBreg <- function(formula, m, data = list(),
   }
 
   conv <- if (opt$convergence == 0) "yes" else "no"
-  sdr <- tryCatch(TMB::sdreport(obj), error = function(e) NULL)
+  sdr <- tryCatch(
+    TMB::sdreport(obj, getJointPrecision = sm$n_smooth > 0L),
+    error = function(e) NULL
+  )
 
   beta <- opt$par[grep("^beta", names(opt$par))]
   if (length(beta) == 0L) beta <- opt$par[seq_len(ncol(X))]
   names(beta) <- colnames(X)
   log_phi <- unname(opt$par["log_phi"])
   phi <- exp(log_phi)
+
+  lambda <- numeric(0)
+  alpha <- numeric(0)
+  alpha.vcov <- NULL
+  fhat <- list()
+  if (sm$n_smooth > 0L) {
+    lam_hat <- opt$par[grep("^log_lambda", names(opt$par))]
+    lambda <- setNames(exp(unname(lam_hat)), sm$labels)
+    alpha <- tryCatch(
+      as.numeric(obj$env$last.par.best[obj$env$random]),
+      error = function(e) rep(NA_real_, sum(sm$smooth_K))
+    )
+    names(alpha) <- colnames(sm$B)
+    for (j in seq_len(sm$n_smooth)) {
+      idx <- sm$blocks_idx[[j]]
+      fhat[[j]] <- as.numeric(sm$specs[[j]]$B %*% alpha[idx])
+    }
+    names(fhat) <- sm$labels
+    # Joint cov of random effects (Bayesian / Laplace)
+    if (!is.null(sdr) && !is.null(sdr$jointPrecision)) {
+      Jp <- as.matrix(sdr$jointPrecision)
+      rn <- colnames(Jp)
+      a_idx <- which(rn == "alpha" | grepl("^alpha", rn))
+      if (!length(a_idx) && length(obj$env$random)) {
+        # names often just "alpha" repeated or indexed
+        a_idx <- grep("alpha", rn)
+      }
+      if (length(a_idx) == length(alpha)) {
+        alpha.vcov <- tryCatch(
+          solve(Jp[a_idx, a_idx, drop = FALSE]),
+          error = function(e) NULL
+        )
+      }
+    }
+  }
 
   if (!is.null(sdr)) {
     vcov.b <- as.matrix(sdr$cov.fixed)
@@ -113,6 +179,7 @@ BBreg <- function(formula, m, data = list(),
   }
 
   eta <- as.numeric(X %*% beta)
+  if (sm$n_smooth > 0L) eta <- eta + as.numeric(sm$B %*% alpha)
   fitted.values <- 1 / (1 + exp(-eta))
 
   e <- sum(y) / sum(m.)
@@ -132,7 +199,7 @@ BBreg <- function(formula, m, data = list(),
   null.p <- pmin(pmax(null.p, 1e-8), 1 - 1e-8)
   null.deviance <- as.numeric(2 * (loglik(p_sat, phi) - loglik(null.p, phi)))
 
-  df <- n - length(beta) - 1L
+  df <- n - length(beta) - 1L - sm$n_smooth
   null.df <- n - 1L
 
   coef.b <- matrix(beta, ncol = 1L, dimnames = list(names(beta), NULL))
@@ -160,6 +227,12 @@ BBreg <- function(formula, m, data = list(),
     obj = obj,
     sdreport = sdr,
     nll = opt$objective,
+    smooth = if (sm$n_smooth > 0L) sm else NULL,
+    alpha = if (length(alpha)) alpha else NULL,
+    alpha.vcov = alpha.vcov,
+    lambda = if (length(lambda)) lambda else NULL,
+    fhat = if (length(fhat)) fhat else NULL,
+    kappa = kappa,
     posterior = NULL,
     stanfit = NULL,
     time_bayes = NA_real_
@@ -169,8 +242,10 @@ BBreg <- function(formula, m, data = list(),
   out <- .bbreg_attach_formulation(out, formula = formula)
 
   if (identical(method, "bayes")) {
+    # parametric-only payload for bb_reg_prior
+    data_bayes <- list(y = y, m = m., X = X)
     out <- .BBreg_add_bayes(
-      out, data_tmb = data_tmb,
+      out, data_tmb = data_bayes,
       chains = chains, iter = iter, warmup = warmup,
       seed = seed, silent = silent
     )
@@ -254,6 +329,15 @@ print.BBreg <- function(x, ...) {
   cat("\nphi (BB dispersion):", as.numeric(x$phi)[1L], "\n")
   if (!is.null(x$log_phi)) {
     cat("log(phi):", as.numeric(x$log_phi)[1L], "\n")
+  }
+  if (!is.null(x$lambda)) {
+    cat("\nlambda (P-spline smoothing):\n")
+    print(x$lambda)
+    if (!is.null(x$fhat)) {
+      for (nm in names(x$fhat)) {
+        cat(sprintf("  sum(%s) = %.3e  (sum-to-zero check)\n", nm, sum(x$fhat[[nm]])))
+      }
+    }
   }
   cat("\nDeviance:", x$deviance, " on ", x$df, " degrees of freedom\n")
   cat("Null deviance:", x$null.deviance, "on", x$null.df, " degrees of freedom\n")

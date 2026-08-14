@@ -1,0 +1,166 @@
+---
+title: "Additive P-splines in PROregTMB"
+author: "Dae-Jin Lee"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Additive P-splines in PROregTMB}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 3.8,
+  dpi = 120
+)
+```
+
+# Model
+
+Additive BB regression on the logit scale:
+
+\[
+\operatorname{logit}(p_i)
+= x_i^\top\beta + \sum_{j=1}^{J} f_j(x_{ij}),\qquad
+f_j = B_j\gamma_j,
+\]
+
+with Eilers–Marx P-splines. For each smooth:
+
+- difference penalty \(\lambda_j\|D_{\mathrm{pord}}\gamma_j\|^2\);
+- sum-to-zero identifiability
+  \(\tfrac12\kappa\bigl(\sum_i f_j(x_{ij})\bigr)^2\)
+  (same idea as absorbing \(\kappa B_j^\top 11^\top B_j\) into the penalty).
+
+Spline coefficients \(\gamma_j\) are integrated out by Laplace approximation;
+smoothing parameters \(\lambda_j\) are estimated jointly (REML-like).
+
+Notation follows Eilers: `ndx` (intervals), `pord` (difference order),
+`bdeg` (B-spline degree).
+
+```{r lib}
+library(PROregTMB)
+```
+
+# Formula API
+
+```{r api-demo, eval=FALSE}
+BBreg(y ~ z + s(age, ndx = 12, pord = 2) + s(bmi, ndx = 10),
+      m = m, data = dat)
+
+BBmm(y ~ s(time, ndx = 10), random = ~ (1 | id),
+     m = m, data = dat)
+```
+
+Defaults: `ndx = 10`, `pord = 2`, `bdeg = 3`, `kappa = 1e6`.
+
+# Cross-sectional additive example
+
+Two centered smooths on independent covariates:
+
+```{r sim-add}
+set.seed(11)
+n <- 300
+m <- 10L
+x1 <- runif(n)
+x2 <- runif(n)
+f1_true <- sin(2 * pi * x1)
+f2_true <- exp(2 * x2) - (exp(2) - 1) / 2
+eta <- -0.4 + f1_true + f2_true
+y <- rBB(n, m, 1 / (1 + exp(-eta)), phi = 0.2)
+dat <- data.frame(y, x1, x2)
+
+fit <- BBreg(
+  y ~ s(x1, ndx = 10, pord = 2) + s(x2, ndx = 10, pord = 2),
+  m = m,
+  data = dat
+)
+fit$conv
+fit$lambda
+```
+
+Check the sum-to-zero constraints and recover component functions:
+
+```{r checks}
+vapply(fit$fhat, sum, numeric(1))
+cor(fit$fhat[["s(x1)"]], f1_true - mean(f1_true))
+cor(fit$fhat[["s(x2)"]], f2_true - mean(f2_true))
+```
+
+```{r plot-add, fig.cap="Estimated additive smooths (orange) vs centered truth (dashed)."}
+truths <- list(f1_true - mean(f1_true), f2_true - mean(f2_true))
+xs <- list(x1, x2)
+labs <- names(fit$fhat)
+op <- par(mfrow = c(1, 2), mar = c(4, 4, 2, 1))
+for (j in 1:2) {
+  g <- seq(min(xs[[j]]), max(xs[[j]]), length.out = 120)
+  pr <- predict_smooth(fit, which = j, x = g)
+  o <- order(xs[[j]])
+  ylim <- range(pr$fit, truths[[j]], finite = TRUE)
+  plot(xs[[j]][o], truths[[j]][o], type = "l", lty = 2, lwd = 1.5,
+       xlab = paste0("x", j), ylab = paste0("f", j),
+       ylim = ylim, main = labs[j])
+  lines(pr$x[order(pr$x)], pr$fit[order(pr$x)], col = "darkorange2", lwd = 2)
+  abline(h = 0, col = "grey70")
+}
+par(op)
+```
+
+`predict_smooth()` returns a grid evaluation; when joint covariance of the
+spline coefficients is available, it also adds pointwise `se` / `lwr` / `upr`
+(Bayesian / Wahba–Silverman style, as in the additive CI notes).
+
+# Mixed model with a smooth (`BBmm`)
+
+```{r mm-smooth}
+set.seed(12)
+n_g <- 30
+n_per <- 5
+m <- 8L
+id <- factor(rep(seq_len(n_g), each = n_per))
+x <- runif(n_g * n_per)
+u <- rnorm(n_g, 0, 0.5)
+eta <- 0.2 + sin(2 * pi * x) + u[id]
+y <- rBB(length(x), m, 1 / (1 + exp(-eta)), phi = 0.15)
+dat_mm <- data.frame(y, x, id)
+
+fit_mm <- BBmm(
+  y ~ s(x, ndx = 10, pord = 2),
+  random = ~ (1 | id),
+  m = m,
+  data = dat_mm
+)
+fit_mm$lambda
+fit_mm$sigma
+sum(fit_mm$fhat[[1]])
+```
+
+```{r plot-mm, fig.cap="Population smooth from BBmm (subject RE integrated)."}
+g <- seq(0, 1, length.out = 100)
+pr <- predict_smooth(fit_mm, which = 1, x = g)
+plot(g, sin(2 * pi * g) - mean(sin(2 * pi * x)), type = "l", lty = 2,
+     xlab = "x", ylab = "f(x)", main = "BBmm + s(x)")
+lines(pr$x, pr$fit, col = "darkorange2", lwd = 2)
+abline(h = 0, col = "grey70")
+legend("topright", c("true (centered)", "estimate"),
+       lty = c(2, 1), lwd = c(1, 2), col = c("black", "darkorange2"),
+       bty = "n")
+```
+
+# Helpers
+
+| Object / function | Role |
+|-------------------|------|
+| `s(x, ndx, pord, bdeg)` | Smooth term in a formula |
+| `bbase()` / `penalty_diff()` / `penalty_center()` | Basis and penalties |
+| `fit$lambda` | Estimated smoothing parameters |
+| `fit$fhat` | Fitted smooths at observed design |
+| `fit$alpha` | Spline coefficients |
+| `predict_smooth()` | Evaluate a component (optional bands) |
+| `kappa` | Weight of the sum-to-zero term |
+
+Multivariate `cbind()` / `dim=` APIs do not yet accept `s()` terms.

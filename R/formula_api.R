@@ -3,11 +3,19 @@
 # fields are kept as aliases for compatibility.
 
 #' @keywords internal
-.bb_model_lines_reg <- function() {
-  c(
-    "Y_i ~ BB(m_i, p_i, phi)",
-    "logit(p_i) = x_i' beta"
-  )
+.bb_model_lines_reg <- function(n_smooth = 0L) {
+  if (n_smooth > 0L) {
+    c(
+      "Y_i ~ BB(m_i, p_i, phi)",
+      "logit(p_i) = x_i' beta + sum_j f_j(x_ij)",
+      "f_j = B_j gamma_j; pen = lambda_j ||D gamma_j||^2 + kappa ||1'B_j gamma_j||^2"
+    )
+  } else {
+    c(
+      "Y_i ~ BB(m_i, p_i, phi)",
+      "logit(p_i) = x_i' beta"
+    )
+  }
 }
 
 #' @keywords internal
@@ -54,7 +62,8 @@
   out$phi <- as.numeric(out$phi)
   out$log_phi <- as.numeric(out$psi)
   out$p <- as.numeric(out$fitted.values)
-  out$model <- .bb_model_lines_reg()
+  ns <- if (!is.null(out$smooth)) out$smooth$n_smooth else 0L
+  out$model <- .bb_model_lines_reg(n_smooth = ns)
   out$formula <- formula
   out
 }

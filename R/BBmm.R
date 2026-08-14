@@ -41,6 +41,7 @@
 #' @param m Maximum score (scalar, vector, length-\(L\), or column name).
 #' @param data Data frame.
 #' @param method `"mle"` (default) or `"bayes"`.
+#' @param kappa Weight for sum-to-zero centering of each `s()` (default `1e8`).
 #' @param maxiter Maximum `nlminb` iterations.
 #' @param show Logical; print progress.
 #' @param nDim Number of dimensions (usually auto-set from `cbind` / `dim`).
@@ -57,6 +58,7 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
                  dim = NULL,
                  m, data = list(),
                  method = c("mle", "bayes"),
+                 kappa = 1e6,
                  maxiter = 100, show = FALSE, nDim = 1L,
                  silent = TRUE, control = list(),
                  chains = 2L, iter = 1000L, warmup = 400L, seed = 1L,
@@ -68,10 +70,17 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
 
   formula_out <- NULL
   multi <- NULL
+  sm <- NULL
 
   # ----- Multivariate clean API (cbind / dim=) -----
   if (!missing(fixed.formula) &&
       ( !is.null(dim) || .is_cbind_response(fixed.formula) )) {
+    if (length(grep("^s\\s*\\(",
+                    attr(stats::terms(fixed.formula, specials = "s"),
+                         "term.labels"))) ) {
+      stop("s() smooths are not yet supported with cbind()/dim= multivariate API",
+           call. = FALSE)
+    }
     if (is.null(data) || !(is.data.frame(data) || is.list(data))) {
       stop("multivariate BBmm requires data = ...", call. = FALSE)
     }
@@ -108,7 +117,8 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
       }
       data <- as.data.frame(data)
       m <- .resolve_m_from_data(m, data, nrow(data))
-      mf <- model.frame(formula = fixed.formula, data = data)
+      sm <- .build_smooth_design(fixed.formula, data = data)
+      mf <- model.frame(formula = sm$fixed, data = data)
       X <- model.matrix(attr(mf, "terms"), data = mf)
       y <- as.numeric(model.response(mf))
       formula_out <- fixed.formula
@@ -119,6 +129,7 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
       X <- as.matrix(X)
       y <- as.numeric(y)
       formula_out <- NULL
+      sm <- list(n_smooth = 0L)
     }
 
     nObs <- length(y)
@@ -162,6 +173,10 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
   if (is.null(multi) && (nObs %% nDim != 0L)) {
     stop("length(y) must be divisible by nDim", call. = FALSE)
   }
+  if (is.null(sm)) sm <- list(n_smooth = 0L)
+  if (identical(method, "bayes") && isTRUE(sm$n_smooth > 0L)) {
+    stop('method = "bayes" does not support s() smooths yet', call. = FALSE)
+  }
 
   Z <- re$Z
   nRand <- re$nRand
@@ -194,7 +209,7 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
   # ----- Starting values -----
   if (!is.null(formula_out) && nDim == 1L) {
     bb0 <- tryCatch(
-      BBreg(formula_out, m = m., data = data, silent = TRUE),
+      BBreg(formula_out, m = m., data = data, kappa = kappa, silent = TRUE),
       error = function(e) NULL
     )
   } else {
@@ -220,31 +235,39 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
     phi0 <- rep(0.5, nDim)
   }
 
-  parameters <- list(
-    beta = beta0,
-    log_phi = log(pmax(phi0, 1e-3)),
-    theta_re = re$theta0,
-    u = rep(0, nRand)
+  spar <- .tmb_smooth_parameters(sm)
+  parameters <- c(
+    list(
+      beta = beta0,
+      log_phi = log(pmax(phi0, 1e-3)),
+      theta_re = re$theta0,
+      u = rep(0, nRand)
+    ),
+    spar
   )
 
-  data_tmb <- list(
-    y = y,
-    m = m.,
-    X = X,
-    Z = Z,
-    dim_id = as.integer(dim_id),
-    nDim = nDim,
-    n_blocks = as.integer(re$n_blocks),
-    block_G = as.integer(re$block_G),
-    block_q = as.integer(re$block_q),
-    block_corr = as.integer(re$block_corr),
-    block_theta0 = as.integer(re$block_theta0)
+  data_tmb <- c(
+    list(
+      y = y,
+      m = m.,
+      X = X,
+      Z = Z,
+      dim_id = as.integer(dim_id),
+      nDim = nDim,
+      n_blocks = as.integer(re$n_blocks),
+      block_G = as.integer(re$block_G),
+      block_q = as.integer(re$block_q),
+      block_corr = as.integer(re$block_corr),
+      block_theta0 = as.integer(re$block_theta0)
+    ),
+    .tmb_smooth_data(sm, n = nObs, kappa = kappa)
   )
 
+  random_tmb <- if (isTRUE(sm$n_smooth > 0L)) c("u", "alpha") else "u"
   obj <- TMB::MakeADFun(
     data = data_tmb,
     parameters = parameters,
-    random = "u",
+    random = random_tmb,
     DLL = "bb_mm",
     silent = silent
   )
@@ -261,7 +284,10 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
   }
 
   conv <- if (opt$convergence == 0) "yes" else "no"
-  sdr <- tryCatch(TMB::sdreport(obj, getJointPrecision = FALSE), error = function(e) NULL)
+  sdr <- tryCatch(
+    TMB::sdreport(obj, getJointPrecision = isTRUE(sm$n_smooth > 0L)),
+    error = function(e) NULL
+  )
 
   # Extract estimates
   par_fixed <- opt$par
@@ -299,9 +325,41 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
   names(sd_all) <- sd_names
   all.sigma <- sd_all
 
-  u_hat <- tryCatch(as.numeric(obj$env$last.par.best[obj$env$random]),
-                    error = function(e) rep(NA_real_, nRand))
+  # Random effects: subject u and optional smooth alpha
+  rand_hat <- tryCatch(as.numeric(obj$env$last.par.best[obj$env$random]),
+                       error = function(e) rep(NA_real_, nRand))
+  rand_names <- names(obj$env$last.par.best[obj$env$random])
+  if (is.null(rand_names)) rand_names <- rep("u", length(rand_hat))
+  # TMB often names all "u" / "alpha" without index; split by length
+  u_hat <- rand_hat[seq_len(nRand)]
   names(u_hat) <- colnames(Z)
+  alpha <- NULL
+  alpha.vcov <- NULL
+  lambda <- NULL
+  fhat <- NULL
+  if (isTRUE(sm$n_smooth > 0L)) {
+    n_alpha <- sum(sm$smooth_K)
+    alpha <- rand_hat[nRand + seq_len(n_alpha)]
+    names(alpha) <- colnames(sm$B)
+    lam_hat <- par_fixed[grep("^log_lambda", nm)]
+    lambda <- setNames(exp(unname(lam_hat)), sm$labels)
+    fhat <- lapply(seq_len(sm$n_smooth), function(j) {
+      idx <- sm$blocks_idx[[j]]
+      as.numeric(sm$specs[[j]]$B %*% alpha[idx])
+    })
+    names(fhat) <- sm$labels
+    if (!is.null(sdr) && !is.null(sdr$jointPrecision)) {
+      Jp <- as.matrix(sdr$jointPrecision)
+      rn <- colnames(Jp)
+      a_idx <- grep("alpha", rn)
+      if (length(a_idx) == length(alpha)) {
+        alpha.vcov <- tryCatch(
+          solve(Jp[a_idx, a_idx, drop = FALSE]),
+          error = function(e) NULL
+        )
+      }
+    }
+  }
 
   fixed.vcov <- matrix(NA_real_, length(beta), length(beta),
                        dimnames = list(names(beta), names(beta)))
@@ -321,6 +379,7 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
   }
 
   eta <- as.numeric(X %*% beta + Z %*% u_hat)
+  if (isTRUE(sm$n_smooth > 0L)) eta <- eta + as.numeric(sm$B %*% alpha)
   fitted <- 1 / (1 + exp(-eta))
 
   loglik_bb <- function(p_hat, phi_hat, y_, m_) {
@@ -404,6 +463,12 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
     structure = if (!is.null(multi)) "shared" else NULL,
     dim_names = if (!is.null(multi)) multi$dim_names else NULL,
     random = random,
+    smooth = if (isTRUE(sm$n_smooth > 0L)) sm else NULL,
+    alpha = alpha,
+    alpha.vcov = alpha.vcov,
+    lambda = lambda,
+    fhat = fhat,
+    kappa = kappa,
     opt = opt,
     obj = obj,
     sdreport = sdr,
@@ -438,6 +503,10 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
       !requireNamespace("rstan", quietly = TRUE)) {
     stop('method = "bayes" requires packages tmbstan and rstan', call. = FALSE)
   }
+  # bb_mm_prior is parametric + subject RE only
+  drop <- c("n_smooth", "B", "S", "C", "smooth_K", "smooth_off", "kappa")
+  data_tmb <- data_tmb[setdiff(names(data_tmb), drop)]
+  parameters <- parameters[setdiff(names(parameters), c("log_lambda", "alpha"))]
   ensure_tmb_dll("bb_mm_prior")
   beta0 <- as.numeric(fit$fixed.coef)
   phi0 <- as.numeric(fit$phi.coef)

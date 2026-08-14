@@ -1,0 +1,172 @@
+---
+title: "PROregTMB mixed and multivariate models"
+author: "Dae-Jin Lee"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{PROregTMB mixed and multivariate models}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 6.5,
+  fig.height = 4,
+  dpi = 120
+)
+```
+
+# Canonical mixed model
+
+**PROregTMB** uses a shared-latent formulation for univariate and multivariate
+BB mixed models:
+
+\[
+\operatorname{logit}(p_{ij}^{(\ell)})
+= x_{ij}^{(\ell)\top}\beta^{(\ell)} + z_{ij}^{\top} a_i,\qquad
+a_i\sim N(0,G),
+\]
+
+estimated by maximizing the Laplace approximation of the marginal likelihood
+(TMB). Here \(\ell\) is the outcome dimension (\(L=1\) univariate), \(j\) indexes
+visits (\(n_i=1\) for cross-sectional data), and
+\(z_{ij}=(1)\) or \((1,t_{ij})^\top\).
+
+```{r lib}
+library(PROregTMB)
+```
+
+# Random intercept
+
+```{r ri}
+set.seed(42)
+n_g <- 30
+n_per <- 6
+m <- 10L
+x <- rnorm(n_g * n_per)
+id <- factor(rep(seq_len(n_g), each = n_per))
+u <- rnorm(n_g, 0, 0.8)
+eta <- 0.5 - 0.4 * x + u[id]
+y <- rBB(length(x), m, 1 / (1 + exp(-eta)), phi = 0.15)
+dat <- data.frame(y, x, id)
+
+fit_ri <- BBmm(y ~ x, random = ~ (1 | id), m = m, data = dat)
+summary(fit_ri)
+```
+
+Primary fields:
+
+```{r ri-fields}
+fit_ri$beta
+fit_ri$phi
+fit_ri$sigma
+head(fit_ri$u)
+fit_ri$model
+```
+
+Legacy PROreg aliases (`$fixed.coef`, `$sigma.coef`, `$random.coef`,
+`$phi.coef`) are still attached.
+
+Crossed factors: `random = ~ (1 | site) + (1 | doc)` (or legacy
+`random.formula = ~ site + doc`).
+
+# Random intercept + random slope
+
+```{r ri-rs}
+set.seed(43)
+n_g <- 40
+n_per <- 5
+m <- 10L
+id <- factor(rep(seq_len(n_g), each = n_per))
+time <- ave(seq_along(id), id, FUN = function(z) seq_along(z) - 1)
+G <- matrix(c(0.7^2, 0.3 * 0.7 * 0.2,
+              0.3 * 0.7 * 0.2, 0.2^2), 2, 2)
+a <- matrix(rnorm(n_g * 2), n_g, 2) %*% chol(G)
+eta <- -0.2 + 0.15 * time + a[id, 1] + a[id, 2] * time
+y <- rBB(length(time), m, 1 / (1 + exp(-eta)), phi = 0.2)
+dat_rs <- data.frame(y, time, id)
+
+fit_rs <- BBmm(
+  y ~ time,
+  random = ~ (1 + time | id),
+  corr = "unstructured",
+  m = m,
+  data = dat_rs
+)
+fit_rs$sigma
+fit_rs$Sigma$id
+fit_rs$Corr$id
+```
+
+Use `corr = "diag"` for independent RI and RS. Aliases for unstructured:
+`"us"`, `"cor"`, `"correlated"`.
+
+# Multivariate shared latent
+
+## Wide / cross-sectional (`cbind`)
+
+```{r multi-wide}
+set.seed(44)
+n <- 80
+id <- factor(seq_len(n))
+x <- rnorm(n)
+a <- rnorm(n, 0, 0.6)
+p1 <- 1 / (1 + exp(-(0.2 - 0.3 * x + a)))
+p2 <- 1 / (1 + exp(-(-0.1 + 0.4 * x + a)))
+dat_w <- data.frame(
+  id = id,
+  x = x,
+  y1 = rBB(n, 20L, p1, 0.15),
+  y2 = rBB(n, 10L, p2, 0.2)
+)
+
+fit_w <- BBmm(
+  cbind(y1, y2) ~ x,
+  random = ~ (1 | id),
+  m = c(20, 10),
+  data = dat_w
+)
+fit_w$beta
+fit_w$phi
+fit_w$sigma
+```
+
+Dimension-specific fixed effects are named with the outcome prefix
+(e.g. `y1.(Intercept)`, `y2.x`). The latent \(a_i\) is **shared**.
+
+## Long format (`dim =`)
+
+```{r multi-long}
+set.seed(45)
+n_g <- 50
+id <- factor(rep(seq_len(n_g), each = 2))
+domain <- factor(rep(c("SF36", "ACT"), times = n_g))
+x <- rnorm(n_g * 2)
+a <- rnorm(n_g, 0, 0.5)[as.integer(id)]
+m_vec <- ifelse(domain == "SF36", 20L, 10L)
+eta <- ifelse(domain == "SF36", 0.1, -0.2) + 0.25 * x + a
+y <- rBB(length(x), m_vec, 1 / (1 + exp(-eta)), phi = 0.18)
+long <- data.frame(y, x, id, domain, m = m_vec)
+
+fit_l <- BBmm(
+  y ~ x,
+  random = ~ (1 | id),
+  dim = "domain",
+  m = "m",
+  data = long
+)
+fit_l$beta
+fit_l$phi
+```
+
+Low-level stacking remains available via `multi_bb_stack()` for advanced use.
+
+# Notes
+
+- Prefer `random = ~ (1 | id)` over legacy `random.formula = ~ id`.
+- Weak RE / large \(\phi\) / few groups: Laplace ML may shrink \(\sigma\to 0\)
+  while PROreg's h-likelihood keeps a small positive value.
+- Additive P-splines can be combined with subject RE; see the P-splines vignette.

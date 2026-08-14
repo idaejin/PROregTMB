@@ -1,0 +1,114 @@
+---
+title: "Getting started with PROregTMB"
+author: "Dae-Jin Lee"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started with PROregTMB}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 6.5,
+  fig.height = 4,
+  dpi = 120
+)
+```
+
+# Overview
+
+**PROregTMB** fits beta-binomial (BB) regression models for patient-reported
+outcomes (bounded integer scores) using
+[TMB](https://github.com/kaskr/adcomp) for automatic differentiation and
+Laplace approximation.
+
+| Function | Role |
+|----------|------|
+| `dBB` / `rBB` | BB density and simulation |
+| `BBest` | Moment / MLE estimate of dispersion \(\phi\) |
+| `BBreg` | Marginal BB logistic regression |
+| `BBmm` | BB mixed model (Gaussian RE + Laplace) |
+| `BBjm` | One-stage BB + Weibull joint model |
+| `s()` | Additive P-splines (Eilers–Marx) inside `BBreg` / `BBmm` |
+
+Related vignettes: mixed / multivariate models; additive P-splines;
+benchmarks and joint-model pilots.
+
+```{r lib}
+library(PROregTMB)
+```
+
+The first call to `BBreg()` / `BBmm()` / `BBjm()` compiles a TMB template
+(requires a C++ toolchain). Later calls in the same session reuse the DLL.
+
+# Beta-binomial building blocks
+
+A score \(y\in\{0,\ldots,m\}\) follows
+\(y\sim\mathrm{BB}(m,p,\phi)\) with mean \(mp\) and overdispersion \(\phi>0\).
+
+```{r bb-sim}
+set.seed(1)
+m <- 10L
+y <- rBB(k = 8, m = m, p = 0.4, phi = 0.25)
+y
+# PMF on 0, ..., m
+round(dBB(m = m, p = 0.4, phi = 0.25), 4)
+```
+
+`BBest()` estimates \(\phi\) from a vector of scores (method of moments or MLE).
+
+```{r bbest}
+set.seed(2)
+y <- rBB(200, m = 10, p = 0.55, phi = 0.3)
+BBest(y, m = 10)
+```
+
+# Marginal BB logistic regression (`BBreg`)
+
+Model:
+
+\[
+y_i\sim\mathrm{BB}(m_i,p_i,\phi),\qquad
+\operatorname{logit}(p_i)=x_i^\top\beta.
+\]
+
+```{r bbreg}
+set.seed(18)
+n <- 400
+m <- 10L
+x <- rnorm(n, 5, 3)
+p <- 1 / (1 + exp(-(-10 + 2 * x)))
+y <- rBB(n, m, p, phi = 1.2)
+dat <- data.frame(y, x)
+
+fit <- BBreg(y ~ x, m = m, data = dat)
+fit
+```
+
+Primary fields follow the formulation (`$beta`, `$phi`, `$p`); PROreg-style
+aliases (`$coefficients`, `$fitted.values`) remain available.
+
+```{r bbreg-fields}
+fit$beta
+fit$phi
+head(fit$p)
+summary(fit)
+```
+
+# Formulation fields
+
+```{r model-lines}
+fit$model
+```
+
+# Next steps
+
+- Random intercepts / slopes and multivariate outcomes: vignette
+  **PROregTMB mixed and multivariate models**.
+- Smooth effects with P-splines: vignette **Additive P-splines in PROregTMB**.
+- Simulation pilots vs PROreg / TSBB / `BBjm`: vignette
+  **PROregTMB benchmarks and joint-model results**.

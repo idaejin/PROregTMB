@@ -1,14 +1,6 @@
-// Beta-binomial mixed-effects model (BBmm).
-// y | u ~ BB(m, p, phi), logit(p) = X beta + Z u
-//
-// Random effects are organized in independent "blocks" (grouping factors).
-// Block b has G_b groups and q_b terms per group. Within a group:
-//   u_g ~ N(0, Sigma_b)
-// with Sigma_b either diagonal (corr_type=0) or unstructured (corr_type=1).
-//
-// u is stored interleaved within each block:
-//   (g=0,t=0), (g=0,t=1), ..., (g=0,t=q-1), (g=1,t=0), ...
-// Blocks are concatenated in Z / u.
+// Beta-binomial mixed-effects model (BBmm) + optional additive P-splines.
+// logit(p) = X beta + Z u + B alpha
+// Subject RE blocks as before; smooths: alpha_j ~ GMRF(lambda_j S_j + kappa C_j)
 #include <TMB.hpp>
 
 template <class Type>
@@ -22,14 +14,12 @@ Type dbetabinom_log(Type y, Type m, Type p, Type phi) {
   return out;
 }
 
-// Number of unconstrained params for one Sigma (q x q)
 template <class Type>
 int n_theta_sigma(int q, int corr_type) {
-  if (corr_type == 0) return q;                 // log SDs
-  return q * (q + 1) / 2;                       // lower Chol
+  if (corr_type == 0) return q;
+  return q * (q + 1) / 2;
 }
 
-// Build Sigma from unconstrained theta slice; also fill sd vector length q
 template <class Type>
 matrix<Type> sigma_from_theta(vector<Type> theta, int q, int corr_type,
                               vector<Type> &sd_out) {
@@ -42,7 +32,6 @@ matrix<Type> sigma_from_theta(vector<Type> theta, int q, int corr_type,
       Sigma(t, t) = s * s;
     }
   } else {
-    // Lower-triangular Chol L: diag = exp(theta), strict lower = free
     matrix<Type> L(q, q);
     L.setZero();
     int k = 0;
@@ -68,17 +57,26 @@ Type objective_function<Type>::operator()() {
   DATA_IVECTOR(dim_id);
   DATA_INTEGER(nDim);
 
-  // RE block metadata
   DATA_INTEGER(n_blocks);
-  DATA_IVECTOR(block_G);      // length n_blocks
-  DATA_IVECTOR(block_q);      // length n_blocks
-  DATA_IVECTOR(block_corr);   // 0=diag, 1=us
-  DATA_IVECTOR(block_theta0); // start index into theta_re for each block
+  DATA_IVECTOR(block_G);
+  DATA_IVECTOR(block_q);
+  DATA_IVECTOR(block_corr);
+  DATA_IVECTOR(block_theta0);
+
+  DATA_INTEGER(n_smooth);
+  DATA_MATRIX(B);
+  DATA_MATRIX(S);
+  DATA_MATRIX(C);
+  DATA_IVECTOR(smooth_K);
+  DATA_IVECTOR(smooth_off);
+  DATA_SCALAR(kappa);
 
   PARAMETER_VECTOR(beta);
-  PARAMETER_VECTOR(log_phi);   // length nDim
-  PARAMETER_VECTOR(theta_re);  // packed RE covariance params
-  PARAMETER_VECTOR(u);         // random effects (Laplace)
+  PARAMETER_VECTOR(log_phi);
+  PARAMETER_VECTOR(theta_re);
+  PARAMETER_VECTOR(u);
+  PARAMETER_VECTOR(log_lambda);
+  PARAMETER_VECTOR(alpha);
 
   int n = y.size();
   Type nll = Type(0);
@@ -87,6 +85,9 @@ Type objective_function<Type>::operator()() {
   for (int d = 0; d < nDim; d++) phi(d) = exp(log_phi(d));
 
   vector<Type> eta = X * beta + Z * u;
+  if (n_smooth > 0) {
+    eta += B * alpha;
+  }
 
   Type eps = Type(1e-8);
   for (int i = 0; i < n; i++) {
@@ -97,7 +98,7 @@ Type objective_function<Type>::operator()() {
     nll -= dbetabinom_log(y(i), m(i), p, phi(d));
   }
 
-  // Random-effect densities by block / group
+  // Subject-level RE
   int u_offset = 0;
   for (int b = 0; b < n_blocks; b++) {
     int G = block_G(b);
@@ -125,7 +126,6 @@ Type objective_function<Type>::operator()() {
       }
     }
 
-    // Report per-block SD / correlation for first block terms via ADREPORT later
     if (b == 0) {
       ADREPORT(sd);
       if (q == 2 && corr == 1) {
@@ -135,6 +135,40 @@ Type objective_function<Type>::operator()() {
     }
 
     u_offset += G * q;
+  }
+
+  // Additive P-splines
+  if (n_smooth > 0) {
+    using namespace density;
+    Type ridge = Type(1e-6);
+    for (int s = 0; s < n_smooth; s++) {
+      Type lam = exp(log_lambda(s));
+      int K = smooth_K(s);
+      int off = smooth_off(s);
+      matrix<Type> Q(K, K);
+      Q.setZero();
+      for (int i = 0; i < K; i++) {
+        for (int j = 0; j < K; j++) {
+          Q(i, j) = lam * S(off + i, off + j);
+        }
+        Q(i, i) += ridge;
+      }
+      vector<Type> as(K);
+      for (int i = 0; i < K; i++) as(i) = alpha(off + i);
+      nll += GMRF(asSparseMatrix(Q))(as);
+
+      Type sumf = Type(0);
+      for (int i = 0; i < n; i++) {
+        Type fi = Type(0);
+        for (int k = 0; k < K; k++) fi += B(i, off + k) * as(k);
+        sumf += fi;
+      }
+      nll += Type(0.5) * kappa * sumf * sumf;
+    }
+    vector<Type> lambda(n_smooth);
+    for (int s = 0; s < n_smooth; s++) lambda(s) = exp(log_lambda(s));
+    ADREPORT(lambda);
+    REPORT(alpha);
   }
 
   ADREPORT(phi);
