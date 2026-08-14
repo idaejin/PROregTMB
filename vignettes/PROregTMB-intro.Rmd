@@ -43,7 +43,8 @@ library(PROregTMB)
 ```
 
 The first call to `BBreg()` / `BBmm()` / `BBjm()` compiles a TMB template
-(requires a C++ toolchain). Later calls in the same session reuse the DLL.
+(requires a C++ toolchain). A short status line is printed; suppress it with
+`options(PROregTMB.verbose_compile = FALSE)`. Later calls reuse the DLL.
 
 # Beta-binomial building blocks
 
@@ -109,6 +110,7 @@ fit$model
 
 - Random intercepts / slopes and multivariate outcomes: vignette
   **PROregTMB mixed and multivariate models**.
-- Smooth effects with P-splines: vignette **Additive P-splines in PROregTMB**.
+- Smooth effects with P-splines and Marra–Wood (2012) bands: vignette
+  **Additive P-splines in PROregTMB**.
 - Simulation pilots vs PROreg / TSBB / `BBjm`: vignette
   **PROregTMB benchmarks and joint-model results**.

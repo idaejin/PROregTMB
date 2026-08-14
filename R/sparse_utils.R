@@ -1,9 +1,12 @@
-## Sparse helpers: Z RE design and alpha covariance from jointPrecision
+## Sparse helpers: Z RE design and Marra–Wood Bayesian Cov(alpha)
 
-#' Extract Cov(alpha) from TMB jointPrecision without densifying all RE
+#' Marginal Cov(alpha) from TMB jointPrecision (Marra–Wood Bayesian CI)
 #'
-#' Uses only the alpha block of the sparse precision (plus optional subject
-#' RE block size to locate indices when names are ambiguous).
+#' For random effects stacked as \code{(u, alpha)}, the Marra–Wood (2012)
+#' Bayesian covariance of the spline coefficients is the **marginal**
+#' block of \eqn{Q^{-1}}, i.e. \code{solve(Q)[alpha, alpha]}, obtained via a
+#' sparse solve against the alpha identity columns (not
+#' \code{solve(Q[alpha,alpha])}, which ignores dependence on subject RE).
 #'
 #' @param jointPrecision Sparse/dense joint precision from `sdreport`.
 #' @param n_alpha Number of spline coefficients.
@@ -14,7 +17,7 @@
   if (is.null(jointPrecision) || n_alpha < 1L) return(NULL)
   Jp <- jointPrecision
   if (!inherits(Jp, "Matrix")) {
-    Jp <- Matrix::Matrix(Jp, sparse = TRUE)
+    Jp <- Matrix::Matrix(as.matrix(Jp), sparse = TRUE)
   }
   rn <- colnames(Jp)
   if (is.null(rn)) rn <- rownames(Jp)
@@ -28,15 +31,23 @@
     if (as.integer(n_u) + n_alpha == nr) {
       a_idx <- seq.int(as.integer(n_u) + 1L, as.integer(n_u) + n_alpha)
     } else if (n_alpha <= nr) {
-      # last n_alpha (common when random = c(u, alpha))
       a_idx <- seq.int(nr - n_alpha + 1L, nr)
     } else {
       return(NULL)
     }
   }
-  Qa <- Jp[a_idx, a_idx, drop = FALSE]
-  V <- tryCatch(as.matrix(Matrix::solve(Qa)), error = function(e) NULL)
-  V
+  # Marginal Cov(alpha) = (Q^{-1})_{aa} via sparse solve Q W = I[, a]
+  tryCatch({
+    nq <- nrow(Jp)
+    E <- Matrix::sparseMatrix(
+      i = a_idx,
+      j = seq_along(a_idx),
+      x = rep(1, length(a_idx)),
+      dims = c(nq, length(a_idx))
+    )
+    W <- Matrix::solve(Jp, E)
+    as.matrix(W[a_idx, , drop = FALSE])
+  }, error = function(e) NULL)
 }
 
 #' Densify Z for TMB DATA_MATRIX (keeps attributes)

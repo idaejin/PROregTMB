@@ -46,4 +46,10 @@ test_that("predict_smooth SE via Rcpp + sparse jointPrecision path", {
   pr <- predict_smooth(fit, which = 1L, x = seq(0, 1, length.out = 40))
   expect_true(all(c("se", "lwr", "upr") %in% names(pr)))
   expect_true(all(is.finite(pr$se)))
+  expect_true(all(pr$lwr <= pr$fit & pr$fit <= pr$upr))
+  # plot helper returns invisibly with bands
+  pdf(NULL)
+  out <- plot_smooth(fit, which = 1L, x = seq(0, 1, length.out = 30))
+  dev.off()
+  expect_true(all(c("lwr", "upr") %in% names(out)))
 })

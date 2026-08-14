@@ -32,7 +32,8 @@ approximation). This vignette summarises numerical experiments comparing:
 3. A **one-stage joint model (`BBjm`)** with shared random effects, vs TSBB
 
 For worked examples of the fitting functions, see the vignettes
-*Getting started*, *Mixed and multivariate models*, and *Additive P-splines*.
+*Getting started*, *Mixed and multivariate models*, and
+*Additive P-splines* (including Marra–Wood confidence bands).
 
 Heavy simulations are **not** re-run here. Precomputed tables ship in
 `inst/extdata/` (also produced by scripts under `scripts/`). Results below are

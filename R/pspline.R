@@ -260,19 +260,33 @@ s <- function(x, ndx = 10L, pord = 2L, bdeg = 3L,
   )
 }
 
-#' Predict an additive smooth component with pointwise bands
+#' Predict an additive smooth with Marra–Wood (2012) pointwise bands
 #'
-#' Uses the Bayesian covariance idea of Wahba/Silverman (as in
-#' `pspline_additive_ci.R`): for TMB fits, SE comes from the joint
-#' covariance of spline coefficients when available.
+#' Pointwise Bayesian confidence intervals for a centered smooth
+#' \eqn{f_j(x)=b(x)^\top\gamma_j} as in Marra & Wood (2012), Biometrika:
+#' \deqn{\widehat f_j(x)\pm z_{1-\alpha/2}\sqrt{b(x)^\top V_{\gamma_j} b(x)},}
+#' where \eqn{V_{\gamma}} is the **marginal** Laplace / Bayesian posterior
+#' covariance of the spline coefficients from TMB's joint precision
+#' (Wahba–Silverman prior induced by the P-spline penalty). These bands
+#' target good *across-the-function* frequentist coverage.
 #'
 #' @param object A `BBreg` or `BBmm` fit with smooths.
 #' @param which Integer index or label of the smooth.
 #' @param x Optional grid; default uses observed covariate.
-#' @param level Confidence level.
-#' @return Data frame with `x`, `fit`, and optionally `se`, `lwr`, `upr`.
+#' @param level Confidence level (default 0.95).
+#' @param se If `TRUE` (default), attach Marra–Wood `se`, `lwr`, `upr`.
+#' @param method Only `"marrawood"` (default) is implemented; accepted for
+#'   API clarity.
+#' @return Data frame with `x`, `fit`, and usually `se`, `lwr`, `upr`.
+#' @references
+#' Marra, G. and Wood, S. N. (2012). Coverage properties of confidence
+#' intervals for generalized additive model components. *Scandinavian
+#' Journal of Statistics*, 39, 53–74.
 #' @export
-predict_smooth <- function(object, which = 1L, x = NULL, level = 0.95) {
+#' @seealso [plot_smooth()]
+predict_smooth <- function(object, which = 1L, x = NULL, level = 0.95,
+                           se = TRUE, method = c("marrawood")) {
+  method <- match.arg(method)
   sm <- object$smooth
   if (is.null(sm) || is.null(sm$n_smooth) || sm$n_smooth < 1L) {
     stop("object has no smooth terms", call. = FALSE)
@@ -297,16 +311,125 @@ predict_smooth <- function(object, which = 1L, x = NULL, level = 0.95) {
   f <- as.numeric(Bg %*% alpha)
 
   out <- data.frame(x = x, fit = f)
-  Vj <- NULL
-  if (!is.null(object$alpha.vcov)) {
-    Vj <- object$alpha.vcov[idx, idx, drop = FALSE]
+  if (!isTRUE(se)) return(out)
+
+  Vfull <- object$alpha.vcov
+  if (is.null(Vfull) && !is.null(object$sdreport)) {
+    n_u <- if (inherits(object, "BBmm")) object$nRand else 0L
+    Vfull <- .alpha_vcov_from_joint(
+      object$sdreport$jointPrecision,
+      n_alpha = length(object$alpha),
+      n_u = n_u
+    )
   }
-  if (!is.null(Vj) && all(is.finite(Vj))) {
-    se <- as.numeric(smooth_se_cpp(Bg, Vj))
-    z <- stats::qnorm(1 - (1 - level) / 2)
-    out$se <- se
-    out$lwr <- f - z * se
-    out$upr <- f + z * se
+  if (is.null(Vfull) && !is.null(object$obj)) {
+    sdr <- tryCatch(
+      TMB::sdreport(object$obj, getJointPrecision = TRUE),
+      error = function(e) NULL
+    )
+    if (!is.null(sdr)) {
+      n_u <- if (inherits(object, "BBmm")) object$nRand else 0L
+      Vfull <- .alpha_vcov_from_joint(
+        sdr$jointPrecision,
+        n_alpha = length(object$alpha),
+        n_u = n_u
+      )
+    }
   }
+  if (is.null(Vfull)) return(out)
+
+  Vj <- Vfull[idx, idx, drop = FALSE]
+  if (!all(is.finite(Vj))) return(out)
+
+  se_hat <- as.numeric(smooth_se_cpp(Bg, Vj))
+  z <- stats::qnorm(1 - (1 - level) / 2)
+  out$se <- se_hat
+  out$lwr <- f - z * se_hat
+  out$upr <- f + z * se_hat
+  attr(out, "level") <- level
+  attr(out, "which") <- j
+  attr(out, "label") <- sm$labels[j]
+  attr(out, "method") <- "marrawood"
   out
 }
+
+#' Plot an additive P-spline with Marra–Wood (2012) confidence bands
+#'
+#' Draws \eqn{\hat f_j} and a shaded pointwise Bayesian band
+#' (Marra & Wood, 2012). See [predict_smooth()].
+#'
+#' @param object A `BBreg` or `BBmm` fit with smooths.
+#' @param which Integer index or label of the smooth (or `"all"`).
+#' @param x Optional evaluation grid.
+#' @param level Confidence level.
+#' @param col Line color for the estimate.
+#' @param shade Band fill color.
+#' @param add If `TRUE`, add to the current plot (`which` must be length 1).
+#' @param xlab,ylab,main Axis labels / title (`NULL` = defaults).
+#' @param ylim y-limits; default spans band and fit.
+#' @param ... Passed to [graphics::plot()] / [graphics::lines()].
+#' @return Invisibly, the data frame from [predict_smooth()] (or a list if
+#'   `which = "all"`).
+#' @export
+plot_smooth <- function(object, which = "all", x = NULL, level = 0.95,
+                        col = "darkorange2", shade = grDevices::adjustcolor(col, 0.30),
+                        add = FALSE, xlab = NULL, ylab = NULL, main = NULL,
+                        ylim = NULL, ...) {
+  sm <- object$smooth
+  if (is.null(sm) || sm$n_smooth < 1L) {
+    stop("object has no smooth terms", call. = FALSE)
+  }
+  if (identical(which, "all")) {
+    which <- seq_len(sm$n_smooth)
+  }
+  if (length(which) > 1L) {
+    if (isTRUE(add)) stop("add = TRUE requires a single smooth", call. = FALSE)
+    n <- length(which)
+    nr <- 1L
+    nc <- n
+    if (n > 3L) {
+      nc <- ceiling(sqrt(n))
+      nr <- ceiling(n / nc)
+    }
+    op <- graphics::par(mfrow = c(nr, nc), mar = c(4, 4, 2.5, 1))
+    on.exit(graphics::par(op), add = TRUE)
+    out <- lapply(which, function(w) {
+      plot_smooth(object, which = w, x = x, level = level, col = col,
+                  shade = shade, add = FALSE, xlab = xlab, ylab = ylab,
+                  main = main, ylim = ylim, ...)
+    })
+    names(out) <- if (is.numeric(which)) sm$labels[which] else which
+    return(invisible(out))
+  }
+
+  pr <- predict_smooth(object, which = which, x = x, level = level, se = TRUE,
+                       method = "marrawood")
+  o <- order(pr$x)
+  pr <- pr[o, , drop = FALSE]
+  lab <- attr(pr, "label")
+  if (is.null(lab)) lab <- paste0("smooth ", which)
+  if (is.null(xlab)) xlab <- "x"
+  if (is.null(ylab)) ylab <- "f(x)"
+  if (is.null(main)) {
+    main <- paste0(lab, " (Marra-Wood ", round(100 * level), "% CI)")
+  }
+  if (is.null(ylim)) {
+    ylim <- range(pr$fit, pr$lwr, pr$upr, na.rm = TRUE)
+  }
+
+  if (!isTRUE(add)) {
+    graphics::plot(pr$x, pr$fit, type = "n", xlab = xlab, ylab = ylab,
+                   main = main, ylim = ylim, ...)
+    graphics::abline(h = 0, col = "grey70")
+  }
+  if (!is.null(pr$lwr) && !is.null(pr$upr)) {
+    graphics::polygon(
+      c(pr$x, rev(pr$x)),
+      c(pr$lwr, rev(pr$upr)),
+      col = shade, border = NA
+    )
+  }
+  graphics::lines(pr$x, pr$fit, col = col, lwd = 2, ...)
+  invisible(pr)
+}
+

@@ -169,4 +169,5 @@ Low-level stacking remains available via `multi_bb_stack()` for advanced use.
 - Prefer `random = ~ (1 | id)` over legacy `random.formula = ~ id`.
 - Weak RE / large \(\phi\) / few groups: Laplace ML may shrink \(\sigma\to 0\)
   while PROreg's h-likelihood keeps a small positive value.
-- Additive P-splines can be combined with subject RE; see the P-splines vignette.
+- Additive P-splines can be combined with subject RE; see the P-splines
+  vignette (Marra–Wood 2012 pointwise bands via `plot_smooth()`).

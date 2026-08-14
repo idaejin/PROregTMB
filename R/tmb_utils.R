@@ -43,11 +43,18 @@
 }
 
 #' Ensure a TMB DLL is compiled and loaded
+#'
+#' On first use (or when the `.cpp` template changes), compiles via
+#' [TMB::compile()] in a quiet subprocess so `clang++` / `make` lines do
+#' not flood the console. A one-line status message is shown unless
+#' `getOption("PROregTMB.verbose_compile")` is `FALSE` or `quiet = TRUE`.
+#'
 #' @param name Template basename without extension (e.g. "bb_reg")
 #' @param force Recompile even if already loaded
+#' @param quiet If `TRUE`, no status message (compiler output still suppressed).
 #' @return Invisibly, the DLL name
 #' @keywords internal
-ensure_tmb_dll <- function(name, force = FALSE) {
+ensure_tmb_dll <- function(name, force = FALSE, quiet = FALSE) {
   src_dir <- .tmb_src_dir()
   cpp <- file.path(src_dir, paste0(name, ".cpp"))
   if (!file.exists(cpp)) {
@@ -71,12 +78,56 @@ ensure_tmb_dll <- function(name, force = FALSE) {
   dir.create(work, showWarnings = FALSE, recursive = TRUE)
   file.copy(cpp, file.path(work, basename(cpp)), overwrite = TRUE)
 
-  wd <- getwd()
-  on.exit(setwd(wd), add = TRUE)
-  setwd(work)
+  show_msg <- !isTRUE(quiet) &&
+    !isFALSE(getOption("PROregTMB.verbose_compile", TRUE))
+  if (show_msg) {
+    message(
+      "PROregTMB: compiling TMB model '", name,
+      "' (first use or template changed; may take a minute)..."
+    )
+  }
 
-  TMB::compile(basename(cpp), flags = .tmb_compile_flags())
-  dyn.load(TMB::dynlib(name))
+  # Subprocess keeps SHLIB / clang noise off the console
+  flags <- .tmb_compile_flags()
+  script <- tempfile("PROregTMB_compile_", fileext = ".R")
+  writeLines(
+    c(
+      "Sys.setenv(MAKEFLAGS = paste(Sys.getenv('MAKEFLAGS'), '-s'))",
+      paste0("setwd(", deparse(work), ")"),
+      paste0(
+        "TMB::compile(", deparse(basename(cpp)),
+        ", flags = ", deparse(flags), ")"
+      )
+    ),
+    script
+  )
+  on.exit(unlink(script), add = TRUE)
+  out <- system2(
+    file.path(R.home("bin"), "Rscript"),
+    c("--vanilla", script),
+    stdout = TRUE,
+    stderr = TRUE
+  )
+  status <- attr(out, "status")
+  if (!is.null(status) && !identical(as.integer(status), 0L)) {
+    stop(
+      "TMB compile failed for '", name, "':\n",
+      paste(out, collapse = "\n"),
+      call. = FALSE
+    )
+  }
+  so <- file.path(work, paste0(name, .Platform$dynlib.ext))
+  if (!file.exists(so)) {
+    stop(
+      "TMB compile produced no DLL for '", name, "':\n",
+      paste(out, collapse = "\n"),
+      call. = FALSE
+    )
+  }
+
+  if (show_msg) message("PROregTMB: '", name, "' ready.")
+
+  dyn.load(so)
   .tmb_env[[name]] <- TRUE
   .tmb_env[[paste0(name, "_mtime")]] <- mtime
   invisible(name)

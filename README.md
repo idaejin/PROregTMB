@@ -28,7 +28,7 @@ For local development without installing:
 devtools::load_all("/path/to/PROregTMB")
 ```
 
-First call to `BBreg()` / `BBmm()` / `BBjm()` compiles the TMB template (needs a C++ toolchain).
+First call to `BBreg()` / `BBmm()` / `BBjm()` compiles the TMB template (needs a C++ toolchain). You should see a short status line instead of raw `clang++` output; silence completely with `options(PROregTMB.verbose_compile = FALSE)`.
 
 ## Quick example
 
@@ -134,7 +134,8 @@ fit_add <- BBreg(
 )
 fit_add$lambda
 sum(fit_add$fhat[["s(age)"]])   # ~ 0
-predict_smooth(fit_add, which = 1, x = seq(...))  # optional bands
+predict_smooth(fit_add, which = 1)   # Marra-Wood (2012) se/lwr/upr
+plot_smooth(fit_add)                 # shaded Marra-Wood bands
 
 BBmm(y ~ s(time, ndx = 10), random = ~ (1 | id), m = m, data = dat)
 ```
@@ -184,7 +185,7 @@ browseVignettes("PROregTMB")
 |----------|---------|
 | Getting started | `dBB` / `rBB`, `BBest`, `BBreg` |
 | Mixed and multivariate | RI, RI+RS, `cbind` / `dim=` |
-| Additive P-splines | `s(x, ndx, pord)`, `predict_smooth` |
+| Additive P-splines | `s(x, ndx, pord)`, Marra–Wood bands, `plot_smooth` |
 | Benchmarks and joint-model results | Precomputed pilots (PROreg, TSBB, `BBjm`) |
 
 From source:
