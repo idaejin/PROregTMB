@@ -48,16 +48,24 @@
 #' @return Invisibly, the DLL name
 #' @keywords internal
 ensure_tmb_dll <- function(name, force = FALSE) {
-  loaded <- vapply(getLoadedDLLs(), function(x) x[["name"]], character(1))
-  if (!force && (name %in% loaded || isTRUE(.tmb_env[[name]]))) {
-    return(invisible(name))
-  }
-
   src_dir <- .tmb_src_dir()
   cpp <- file.path(src_dir, paste0(name, ".cpp"))
   if (!file.exists(cpp)) {
     stop("TMB template not found: ", cpp, call. = FALSE)
   }
+  mtime <- file.info(cpp)$mtime
+  cached_mtime <- .tmb_env[[paste0(name, "_mtime")]]
+  loaded <- vapply(getLoadedDLLs(), function(x) x[["name"]], character(1))
+  stale <- is.null(cached_mtime) || !identical(cached_mtime, mtime)
+  if (!force && !stale && (name %in% loaded || isTRUE(.tmb_env[[name]]))) {
+    return(invisible(name))
+  }
+  # Drop previous DLL if we must rebuild
+  if (name %in% loaded) {
+    dll <- getLoadedDLLs()[[name]]
+    try(dyn.unload(dll[["path"]]), silent = TRUE)
+  }
+  .tmb_env[[name]] <- NULL
 
   work <- file.path(tempdir(), "PROregTMB_tmb")
   dir.create(work, showWarnings = FALSE, recursive = TRUE)
@@ -70,5 +78,6 @@ ensure_tmb_dll <- function(name, force = FALSE) {
   TMB::compile(basename(cpp), flags = .tmb_compile_flags())
   dyn.load(TMB::dynlib(name))
   .tmb_env[[name]] <- TRUE
+  .tmb_env[[paste0(name, "_mtime")]] <- mtime
   invisible(name)
 }

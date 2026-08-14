@@ -1,126 +1,197 @@
 #' Beta-binomial mixed-effects model via TMB
 #'
-#' Fits
-#' \deqn{y \mid u \sim \mathrm{BB}(m, p, \phi),\quad
-#' \mathrm{logit}(p) = X\beta + Zu,\quad u \sim N(0, D)}
-#' with Laplace approximation of the marginal likelihood (TMB).
+#' Unified shared-latent formulation
+#' \deqn{\mathrm{logit}(p_{ij}^{(\ell)})
+#'   = x_{ij}^{(\ell)\top}\beta^{(\ell)} + z_{ij}^{\top} a_i,
+#'   \quad a_i \sim N(0,G),}
+#' with Laplace approximation of the marginal likelihood. Here \(\ell\) is the
+#' outcome dimension (\(L=1\) univariate), \(j\) indexes visits
+#' (\(n_i=1\) cross-sectional), and \(z_{ij}=(1)\) or \((1,t_{ij})^\top\).
 #'
-#' Specify the random structure either with `random.formula` or with
-#' design matrix `Z` plus `nRandComp`.
+#' **Random effects**
+#' \itemize{
+#'   \item \code{random = ~ (1 | id)} — random intercept
+#'   \item \code{random = ~ (1 + time | id)} — RI + RS;
+#'     \code{corr = "unstructured"} (default if \(q>1\)) or \code{"diag"}
+#'   \item Legacy: \code{random.formula = ~ id}
+#'   \item Advanced: \code{Z} + \code{nRandComp}
+#' }
 #'
-#' @param fixed.formula Fixed-effects formula (response ~ covariates).
+#' **Multivariate (shared \(a_i\))**
+#' \itemize{
+#'   \item Wide (CS): \code{cbind(y1,y2,y3) ~ x} with \code{random = ~ (1|id)}
+#'   \item Long (CS or longitudinal): \code{y ~ x + time} with
+#'     \code{dim = "domain"} (column naming the dimension \(\ell\))
+#' }
+#' Low-level stacking: [multi_bb_stack()].
+#'
+#' @param fixed.formula Fixed-effects formula. Multivariate wide form:
+#'   \code{cbind(y1,y2) ~ x}.
 #' @param X Fixed-effects design matrix (alternative to `fixed.formula`).
-#' @param y Response vector (required if `X` is supplied). For
-#'   multidimensional models, stack outcomes one after another.
-#' @param random.formula Random-effects formula (e.g. `~ group`).
+#' @param y Response vector (required if `X` is supplied).
+#' @param random Random-effects formula with `|` bars, or a named list.
+#' @param random.formula Legacy PROreg-style grouping factors only.
 #' @param Z Random-effects design matrix.
-#' @param nRandComp Number of random effects per variance component
-#'   (required with `Z`).
-#' @param m Maximum score (scalar or vector).
-#' @param data Optional data frame.
+#' @param nRandComp Number of RE per variance component (with `Z`).
+#' @param corr Within-subject \(G\) for multi-term RE: `"unstructured"` /
+#'   `"us"` or `"diag"`. Aliases: `"cor"`, `"correlated"`.
+#' @param dim Character: name of the dimension/domain column for **long**
+#'   multivariate data (shared latent \(a_i\)). Mutually exclusive with
+#'   \code{cbind()} responses.
+#' @param m Maximum score (scalar, vector, length-\(L\), or column name).
+#' @param data Data frame.
+#' @param method `"mle"` (default) or `"bayes"`.
 #' @param maxiter Maximum `nlminb` iterations.
 #' @param show Logical; print progress.
-#' @param nDim Number of response dimensions (default 1).
+#' @param nDim Number of dimensions (usually auto-set from `cbind` / `dim`).
 #' @param silent Suppress TMB tracing.
 #' @param control Extra [stats::nlminb()] control.
+#' @param chains,iter,warmup,seed Stan controls when `method = "bayes"`.
+#' @param laplace_bayes If `TRUE`, tmbstan uses Laplace for `u`.
 #' @return Object of class `BBmm`.
 #' @export
-BBmm <- function(fixed.formula, X, y, random.formula = NULL, Z = NULL,
-                 nRandComp = NULL, m, data = list(),
+BBmm <- function(fixed.formula, X, y, random = NULL,
+                 random.formula = NULL, Z = NULL,
+                 nRandComp = NULL,
+                 corr = c("unstructured", "us", "diag"),
+                 dim = NULL,
+                 m, data = list(),
+                 method = c("mle", "bayes"),
                  maxiter = 100, show = FALSE, nDim = 1L,
-                 silent = TRUE, control = list()) {
-
+                 silent = TRUE, control = list(),
+                 chains = 2L, iter = 1000L, warmup = 400L, seed = 1L,
+                 laplace_bayes = TRUE) {
+  method <- match.arg(method)
+  corr <- .normalize_corr(if (length(corr)) corr[1] else "unstructured")
   nDim <- as.integer(nDim)
   if (nDim < 1L) stop("nDim must be >= 1", call. = FALSE)
 
-  # ----- Fixed part -----
-  if (!missing(fixed.formula)) {
-    if (!missing(X) || !missing(y)) {
-      stop("Specify either fixed.formula or (X, y), not both", call. = FALSE)
+  formula_out <- NULL
+  multi <- NULL
+
+  # ----- Multivariate clean API (cbind / dim=) -----
+  if (!missing(fixed.formula) &&
+      ( !is.null(dim) || .is_cbind_response(fixed.formula) )) {
+    if (is.null(data) || !(is.data.frame(data) || is.list(data))) {
+      stop("multivariate BBmm requires data = ...", call. = FALSE)
     }
-    mf <- model.frame(formula = fixed.formula, data = data)
-    X <- model.matrix(attr(mf, "terms"), data = mf)
-    y <- as.numeric(model.response(mf))
-    formula_out <- fixed.formula
+    if (!is.null(Z) || !is.null(nRandComp)) {
+      stop("Do not pass Z/nRandComp with cbind()/dim=; use random=",
+           call. = FALSE)
+    }
+    multi <- .prepare_multivariate_bbmm(
+      fixed.formula = fixed.formula,
+      data = data,
+      m = m,
+      dim = dim,
+      random = random,
+      random.formula = random.formula,
+      corr = corr
+    )
+    y <- multi$y
+    X <- multi$X
+    m. <- multi$m
+    nDim <- multi$nDim
+    data <- multi$data_re
+    re <- multi$re
+    formula_out <- multi$formula_out
+    balanced <- if (length(unique(m.)) == 1L) "yes" else "no"
+    nObs <- length(y)
   } else {
-    if (missing(X) || missing(y)) {
-      stop("Provide fixed.formula or both X and y", call. = FALSE)
+    # ----- Univariate / manual X,y -----
+    if (!missing(fixed.formula)) {
+      if (!missing(X) || !missing(y)) {
+        stop("Specify either fixed.formula or (X, y), not both", call. = FALSE)
+      }
+      if (is.null(data) || (is.list(data) && !is.data.frame(data) && !length(data))) {
+        stop("fixed.formula requires data", call. = FALSE)
+      }
+      data <- as.data.frame(data)
+      m <- .resolve_m_from_data(m, data, nrow(data))
+      mf <- model.frame(formula = fixed.formula, data = data)
+      X <- model.matrix(attr(mf, "terms"), data = mf)
+      y <- as.numeric(model.response(mf))
+      formula_out <- fixed.formula
+    } else {
+      if (missing(X) || missing(y)) {
+        stop("Provide fixed.formula or both X and y", call. = FALSE)
+      }
+      X <- as.matrix(X)
+      y <- as.numeric(y)
+      formula_out <- NULL
     }
-    X <- as.matrix(X)
-    y <- as.numeric(y)
-    formula_out <- NULL
+
+    nObs <- length(y)
+    if (nrow(X) != nObs) stop("nrow(X) must equal length(y)", call. = FALSE)
+
+    if (is.character(m)) m <- .resolve_m_from_data(m, data, nObs)
+    if (any(m != as.integer(m)) || min(m) <= 0) {
+      stop("m must be positive integer(s)", call. = FALSE)
+    }
+    if (length(m) == 1L) {
+      balanced <- "yes"
+      m. <- rep(as.numeric(m), nObs)
+    } else {
+      m. <- as.numeric(m)
+      if (length(m.) != nObs) stop("m must be scalar or length(y)", call. = FALSE)
+      balanced <- if (length(unique(m.)) == 1L) "yes" else "no"
+    }
+
+    if (is.null(data) || (is.list(data) && !is.data.frame(data) && !length(data))) {
+      data <- data.frame(y = y)
+    } else {
+      data <- as.data.frame(data)
+    }
+
+    re <- .build_re_structure(
+      random = random,
+      random.formula = random.formula,
+      Z = Z,
+      nRandComp = nRandComp,
+      data = data,
+      corr = corr,
+      nObs = nObs
+    )
   }
 
-  nObs <- length(y)
-  if (nrow(X) != nObs) stop("nrow(X) must equal length(y)", call. = FALSE)
-
-  if (any(m != as.integer(m)) || min(m) <= 0) {
+  if (any(y != as.integer(y))) stop("y must be integer", call. = FALSE)
+  if (any(m. != as.integer(m.)) || min(m.) <= 0) {
     stop("m must be positive integer(s)", call. = FALSE)
   }
-  if (length(m) == 1L) {
-    balanced <- "yes"
-    m. <- rep(as.numeric(m), nObs)
-  } else {
-    m. <- as.numeric(m)
-    if (length(m.) != nObs) stop("m must be scalar or length(y)", call. = FALSE)
-    balanced <- if (length(unique(m.)) == 1L) "yes" else "no"
-  }
-  if (any(y != as.integer(y))) stop("y must be integer", call. = FALSE)
   if (any(y < 0 | y > m.)) stop("y must be bounded between 0 and m", call. = FALSE)
-  if (nObs %% nDim != 0L) {
+  if (is.null(multi) && (nObs %% nDim != 0L)) {
     stop("length(y) must be divisible by nDim", call. = FALSE)
   }
 
-  # ----- Random part -----
-  if (is.null(random.formula) && is.null(Z)) {
-    stop("Random part must be specified (random.formula or Z)", call. = FALSE)
-  }
-  if (!is.null(random.formula) && !is.null(Z)) {
-    stop("Random part specified twice", call. = FALSE)
-  }
-  if (!is.null(Z) && is.null(nRandComp)) {
-    stop("nRandComp must be specified when Z is given", call. = FALSE)
-  }
-  if (is.null(Z) && !is.null(nRandComp)) {
-    stop("nRandComp only used when Z is given", call. = FALSE)
-  }
+  Z <- re$Z
+  nRand <- re$nRand
+  namesRand <- re$namesRand
+  nRandComp <- re$nRandComp
+  nComp <- re$nComp
 
-  if (is.null(Z)) {
-    # ~ factor1 + factor2  -> one variance component per factor
-    rf <- stats::update(random.formula, ~ . - 1)
-    random.mf <- model.frame(formula = rf, data = data)
-    nComp <- ncol(random.mf)
-    nRandComp <- integer(nComp)
-    Z <- NULL
-    namesRand <- names(random.mf)
-    for (i in seq_len(nComp)) {
-      z <- model.matrix(~ random.mf[[i]] - 1)
-      Z <- cbind(Z, z)
-      nRandComp[i] <- ncol(z)
+  # Dimension id for phi_ell
+  if (!is.null(multi) && identical(multi$mode, "long")) {
+    # blocks may have unequal size: build dim_id from ordered factor
+    dcol <- multi$dim_names
+    # y stacked by dimension in .prepare; use lengths of unique runs
+    # Reconstruct from nDim equal blocks if balanced; else from data
+    if (!is.null(dim) && dim %in% names(data)) {
+      dim_id <- as.integer(droplevels(as.factor(data[[dim]]))) - 1L
+    } else {
+      n_per_dim <- nObs / nDim
+      dim_id <- rep(seq_len(nDim) - 1L, each = n_per_dim)
     }
-    Z <- as.matrix(Z)
   } else {
-    Z <- as.matrix(Z)
-    nComp <- length(nRandComp)
-    nRandComp <- as.integer(nRandComp)
-    if (ncol(Z) != sum(nRandComp)) {
-      stop("sum(nRandComp) must equal ncol(Z)", call. = FALSE)
-    }
-    namesRand <- as.character(seq_len(nComp))
+    n_per_dim <- nObs / nDim
+    dim_id <- rep(seq_len(nDim) - 1L, each = n_per_dim)
   }
-
-  if (nrow(Z) != nObs) stop("nrow(Z) must equal length(y)", call. = FALSE)
-  nRand <- ncol(Z)
-  re_comp <- rep(seq_len(nComp) - 1L, times = nRandComp)
-
-  # Dimension id for stacked multi-response
-  n_per_dim <- nObs / nDim
-  dim_id <- rep(seq_len(nDim) - 1L, each = n_per_dim)
+  if (length(dim_id) != nObs) {
+    stop("internal dim_id length mismatch", call. = FALSE)
+  }
 
   ensure_tmb_dll("bb_mm")
 
   # ----- Starting values -----
-  # Intercept-only / fixed-only BB as warm start (ignore RE)
   if (!is.null(formula_out) && nDim == 1L) {
     bb0 <- tryCatch(
       BBreg(formula_out, m = m., data = data, silent = TRUE),
@@ -152,7 +223,7 @@ BBmm <- function(fixed.formula, X, y, random.formula = NULL, Z = NULL,
   parameters <- list(
     beta = beta0,
     log_phi = log(pmax(phi0, 1e-3)),
-    log_sigma = rep(log(0.5), nComp),
+    theta_re = re$theta0,
     u = rep(0, nRand)
   )
 
@@ -161,9 +232,13 @@ BBmm <- function(fixed.formula, X, y, random.formula = NULL, Z = NULL,
     m = m.,
     X = X,
     Z = Z,
-    re_comp = as.integer(re_comp),
     dim_id = as.integer(dim_id),
-    nDim = nDim
+    nDim = nDim,
+    n_blocks = as.integer(re$n_blocks),
+    block_G = as.integer(re$block_G),
+    block_q = as.integer(re$block_q),
+    block_corr = as.integer(re$block_corr),
+    block_theta0 = as.integer(re$block_theta0)
   )
 
   obj <- TMB::MakeADFun(
@@ -196,21 +271,42 @@ BBmm <- function(fixed.formula, X, y, random.formula = NULL, Z = NULL,
   names(beta) <- colnames(X)
 
   log_phi <- unname(par_fixed[grep("^log_phi", nm)])
-  log_sigma <- unname(par_fixed[grep("^log_sigma", nm)])
+  theta_hat <- unname(par_fixed[grep("^theta_re", nm)])
+  if (length(theta_hat) == 0L) theta_hat <- re$theta0
   phi <- exp(log_phi)
-  all.sigma <- exp(log_sigma)
-  names(all.sigma) <- namesRand
 
-  # Random effects: last mode
+  # Per-block Sigma / sd / Corr
+  Sigma_list <- vector("list", re$n_blocks)
+  names(Sigma_list) <- vapply(re$blocks, `[[`, character(1), "name")
+  Corr_list <- Sigma_list
+  sd_all <- numeric(0)
+  sd_names <- character(0)
+  for (b in seq_len(re$n_blocks)) {
+    q <- re$block_q[b]
+    nt <- .n_theta_sigma(q, re$blocks[[b]]$corr)
+    i0 <- re$block_theta0[b] + 1L
+    th <- theta_hat[i0:(i0 + nt - 1L)]
+    unpacked <- .sigma_from_theta(th, q, re$blocks[[b]]$corr)
+    tn <- re$blocks[[b]]$term_names
+    rownames(unpacked$Sigma) <- colnames(unpacked$Sigma) <- tn
+    rownames(unpacked$Corr) <- colnames(unpacked$Corr) <- tn
+    names(unpacked$sd) <- tn
+    Sigma_list[[b]] <- unpacked$Sigma
+    Corr_list[[b]] <- unpacked$Corr
+    sd_all <- c(sd_all, unpacked$sd)
+    sd_names <- c(sd_names, paste0(re$blocks[[b]]$name, ".", tn))
+  }
+  names(sd_all) <- sd_names
+  all.sigma <- sd_all
+
   u_hat <- tryCatch(as.numeric(obj$env$last.par.best[obj$env$random]),
                     error = function(e) rep(NA_real_, nRand))
-  names(u_hat) <- seq_len(nRand)
+  names(u_hat) <- colnames(Z)
 
-  # Variances from sdreport
   fixed.vcov <- matrix(NA_real_, length(beta), length(beta),
                        dimnames = list(names(beta), names(beta)))
   psi.var <- rep(NA_real_, nDim)
-  all.sigma.var <- rep(NA_real_, nComp)
+  all.sigma.var <- rep(NA_real_, length(all.sigma))
 
   if (!is.null(sdr)) {
     covf <- as.matrix(sdr$cov.fixed)
@@ -222,19 +318,12 @@ BBmm <- function(fixed.formula, X, y, random.formula = NULL, Z = NULL,
     }
     phi_idx <- grep("^log_phi", fnm)
     if (length(phi_idx)) psi.var <- diag(covf)[phi_idx]
-    sig_idx <- grep("^log_sigma", fnm)
-    if (length(sig_idx)) {
-      # delta method for sigma = exp(log_sigma): Var(sigma) = sigma^2 Var(log_sigma)
-      all.sigma.var <- (all.sigma^2) * diag(covf)[sig_idx]
-    }
   }
 
   eta <- as.numeric(X %*% beta + Z %*% u_hat)
   fitted <- 1 / (1 + exp(-eta))
 
-  # Simple deviance using conditional BB (like PROreg conditional fit)
   loglik_bb <- function(p_hat, phi_hat, y_, m_) {
-    # phi_hat recycled by dim
     a <- p_hat / phi_hat
     b <- (1 - p_hat) / phi_hat
     sum(
@@ -252,22 +341,41 @@ BBmm <- function(fixed.formula, X, y, random.formula = NULL, Z = NULL,
   null.p <- pmin(pmax(rep(e, nObs), 1e-8), 1 - 1e-8)
   null.deviance <- as.numeric(2 * (loglik_bb(p_sat, phi_i, y, m.) -
                                      loglik_bb(null.p, phi_i, y, m.)))
-  df <- nObs - length(beta) - length(all.sigma) - nDim
-  null.df <- nObs - 1L - length(all.sigma) - nDim
+  n_re_par <- length(theta_hat)
+  df <- nObs - length(beta) - n_re_par - nDim
+  null.df <- nObs - 1L - n_re_par - nDim
 
-  # D matrix
-  d <- rep(all.sigma^2, times = nRandComp)
-  D <- diag(d, nrow = nRand)
+  # Full D (block-diagonal copies of each Sigma)
+  D <- matrix(0, nRand, nRand)
+  u_off <- 0L
+  for (b in seq_len(re$n_blocks)) {
+    G <- re$block_G[b]
+    q <- re$block_q[b]
+    Sb <- Sigma_list[[b]]
+    for (g in seq_len(G)) {
+      idx <- u_off + (g - 1L) * q + seq_len(q)
+      D[idx, idx] <- Sb
+    }
+    u_off <- u_off + G * q
+  }
 
   psi <- log(phi)
   names(psi) <- if (nDim == 1L) "log(phi)" else paste0("log(phi)", seq_len(nDim))
+
+  # Legacy sigma.coef: for pure RI blocks use block SDs named by factor;
+  # for RI+RS keep term-level names
+  sigma.coef <- all.sigma
 
   out <- list(
     fixed.coef = beta,
     fixed.vcov = fixed.vcov,
     random.coef = u_hat,
-    sigma.coef = all.sigma,
+    sigma.coef = sigma.coef,
     sigma.var = all.sigma.var,
+    Sigma = Sigma_list,
+    Corr = Corr_list,
+    theta_re = theta_hat,
+    re_blocks = re$blocks,
     phi.coef = if (nDim == 1L) phi[1] else phi,
     psi.coef = if (nDim == 1L) psi[1] else psi,
     psi.var = if (nDim == 1L) psi.var[1] else psi.var,
@@ -290,74 +398,218 @@ BBmm <- function(fixed.formula, X, y, random.formula = NULL, Z = NULL,
     D = D,
     balanced = balanced,
     m = if (balanced == "yes") m.[1] else m.,
+    method = method,
+    corr = corr,
+    dim = dim,
+    structure = if (!is.null(multi)) "shared" else NULL,
+    dim_names = if (!is.null(multi)) multi$dim_names else NULL,
+    random = random,
     opt = opt,
     obj = obj,
     sdreport = sdr,
-    nll = opt$objective
+    nll = opt$objective,
+    posterior = NULL,
+    stanfit = NULL,
+    time_bayes = NA_real_
   )
   class(out) <- "BBmm"
   out$call <- match.call()
   out$formula <- formula_out
+  out <- .bbmm_attach_formulation(
+    out,
+    fixed.formula = formula_out,
+    random.formula = if (!is.null(random)) random else random.formula
+  )
+
+  if (identical(method, "bayes")) {
+    out <- .BBmm_add_bayes(
+      out, data_tmb = data_tmb, parameters = parameters,
+      chains = chains, iter = iter, warmup = warmup, seed = seed,
+      silent = silent, laplace_bayes = laplace_bayes
+    )
+  }
   out
+}
+
+# Bayes via tmbstan on bb_mm_prior
+.BBmm_add_bayes <- function(fit, data_tmb, parameters, chains, iter,
+                            warmup, seed, silent, laplace_bayes = TRUE) {
+  if (!requireNamespace("tmbstan", quietly = TRUE) ||
+      !requireNamespace("rstan", quietly = TRUE)) {
+    stop('method = "bayes" requires packages tmbstan and rstan', call. = FALSE)
+  }
+  ensure_tmb_dll("bb_mm_prior")
+  beta0 <- as.numeric(fit$fixed.coef)
+  phi0 <- as.numeric(fit$phi.coef)
+  if (length(phi0) == 1L) phi0 <- rep(phi0, fit$nDim)
+  th0 <- as.numeric(fit$theta_re)
+  u0 <- as.numeric(fit$random.coef)
+  pars <- list(
+    beta = beta0,
+    log_phi = log(pmax(phi0, 1e-6)),
+    theta_re = th0,
+    u = u0
+  )
+  obj <- TMB::MakeADFun(
+    data = data_tmb,
+    parameters = pars,
+    random = "u",
+    DLL = "bb_mm_prior",
+    silent = silent
+  )
+  init_fn <- function() {
+    list(
+      beta = beta0 + stats::rnorm(length(beta0), 0, 0.05),
+      log_phi = log(pmax(phi0, 1e-6)) + stats::rnorm(length(phi0), 0, 0.05),
+      theta_re = th0 + stats::rnorm(length(th0), 0, 0.05),
+      u = u0
+    )
+  }
+  if (isTRUE(laplace_bayes)) {
+    init_fn <- function() {
+      list(
+        beta = beta0 + stats::rnorm(length(beta0), 0, 0.05),
+        log_phi = log(pmax(phi0, 1e-6)) + stats::rnorm(length(phi0), 0, 0.05),
+        theta_re = th0 + stats::rnorm(length(th0), 0, 0.05)
+      )
+    }
+  }
+  t1 <- proc.time()[["elapsed"]]
+  stanfit <- tmbstan::tmbstan(
+    obj,
+    chains = as.integer(chains),
+    iter = as.integer(iter),
+    warmup = as.integer(warmup),
+    seed = as.integer(seed),
+    refresh = 0,
+    init = init_fn,
+    laplace = isTRUE(laplace_bayes),
+    control = list(adapt_delta = 0.95, max_treedepth = 12)
+  )
+  fit$time_bayes <- proc.time()[["elapsed"]] - t1
+  fit$stanfit <- stanfit
+
+  phi_names <- if (fit$nDim == 1L) "phi" else paste0("phi", seq_len(fit$nDim))
+  fit$posterior <- .posterior_from_stanfit(
+    stanfit,
+    beta_names = names(fit$fixed.coef),
+    phi_names = phi_names,
+    sigma_names = names(fit$sigma.coef)
+  )
+  fit
 }
 
 #' @export
 print.BBmm <- function(x, ...) {
   cat("Call:\t")
   print(x$call)
-  cat("\nFixed effects estimation:\n")
-  print(x$fixed.coef)
-  cat("\nStandard deviation of normal random effects:\n")
-  for (i in seq_along(x$namesRand)) {
-    cat(x$namesRand[i], x$sigma.coef[i], "\n")
+  .cat_model_block(
+    "Model (BBmm):",
+    if (!is.null(x$model)) x$model else .bb_model_lines_mm(x$nDim, x$namesRand)
+  )
+  if (!is.null(x$fixed.formula) || !is.null(x$random.formula)) {
+    cat("Formulas: fixed = ")
+    print(if (!is.null(x$fixed.formula)) x$fixed.formula else NA)
+    cat("          random = ")
+    print(if (!is.null(x$random.formula)) x$random.formula else NA)
+    cat("\n")
   }
-  cat("\nBeta-binomial dispersion parameter:",
-      paste(x$phi.coef, collapse = ", "), "\n")
-  cat("\nDeviance of the model:", x$deviance)
+  cat("Method:", if (!is.null(x$method)) x$method else "mle")
+  if (identical(x$method, "bayes")) cat(" (point estimates below are MLE / Laplace)")
+  cat("\n\n")
+  cat("beta (fixed effects, logit scale):\n")
+  print(if (!is.null(x$beta)) x$beta else x$fixed.coef)
+
+  cat("\nRandom-effect SDs (sigma):\n")
+  sig <- if (!is.null(x$sigma)) x$sigma else x$sigma.coef
+  for (i in seq_along(sig)) {
+    nm <- if (!is.null(names(sig))) names(sig)[i] else as.character(i)
+    cat("  ", nm, ": ", sig[i], "\n", sep = "")
+  }
+  if (!is.null(x$Corr) && length(x$Corr)) {
+    for (nm in names(x$Corr)) {
+      C <- x$Corr[[nm]]
+      if (is.matrix(C) && nrow(C) > 1L) {
+        cat("\nCorr (", nm, "):\n", sep = "")
+        print(round(C, 3))
+      }
+    }
+  }
+  cat("\nphi (BB dispersion):", paste(x$phi, collapse = ", "), "\n")
+  if (identical(x$method, "bayes") && !is.null(x$posterior)) {
+    cat("\nPosterior summary (tmbstan):\n")
+    print(x$posterior, row.names = FALSE, digits = 4)
+    if (is.finite(x$time_bayes)) {
+      cat(sprintf("Bayes sampling time: %.2fs\n", x$time_bayes))
+    }
+  }
+  cat("\nDeviance:", x$deviance)
   cat("\nNumber of iterations:", x$iter)
   if (x$balanced == "yes") {
-    cat("\nBalanced data, maximum score number:", x$m, "\n")
+    cat("\nBalanced data, m =", x$m, "\n")
   } else {
-    cat("\nNo balanced data.\n")
+    cat("\nUnbalanced m.\n")
   }
   invisible(x)
 }
 
 #' @export
 summary.BBmm <- function(object, ...) {
+  beta <- if (!is.null(object$beta)) object$beta else object$fixed.coef
   fixed.se <- sqrt(diag(object$fixed.vcov))
-  fixed.tval <- object$fixed.coef / fixed.se
+  fixed.tval <- as.numeric(beta) / fixed.se
   fixed.TAB <- cbind(
-    Estimate = object$fixed.coef,
+    Estimate = as.numeric(beta),
     StdErr = fixed.se,
     t.value = fixed.tval,
     p.value = 2 * pnorm(-abs(fixed.tval))
   )
+  rownames(fixed.TAB) <- names(beta)
 
-  psi <- object$psi.coef
+  log_phi <- object$log_phi
+  if (is.null(log_phi)) log_phi <- object$psi.coef
+  phi <- object$phi
+  if (is.null(phi)) phi <- object$phi.coef
   psi.se <- sqrt(object$psi.var)
-  if (length(psi) == 1L) {
-    psi.table <- cbind(Estimate = psi, StdErr = psi.se)
+  if (length(as.numeric(log_phi)) == 1L) {
+    psi.table <- cbind(Estimate = as.numeric(log_phi), StdErr = as.numeric(psi.se)[1L])
     rownames(psi.table) <- "log(phi)"
+    phi.table <- cbind(
+      Estimate = c(phi = as.numeric(phi)[1L], log_phi = as.numeric(log_phi)[1L]),
+      StdErr = c(as.numeric(phi)[1L] * as.numeric(psi.se)[1L], as.numeric(psi.se)[1L])
+    )
   } else {
-    psi.table <- cbind(Estimate = psi, StdErr = psi.se)
+    psi.table <- cbind(Estimate = as.numeric(log_phi), StdErr = as.numeric(psi.se))
+    rownames(psi.table) <- names(log_phi)
+    phi.table <- cbind(
+      Estimate = as.numeric(phi),
+      StdErr = as.numeric(phi) * as.numeric(psi.se)
+    )
+    rownames(phi.table) <- paste0("phi", seq_along(phi))
   }
 
+  sigma <- if (!is.null(object$sigma)) object$sigma else object$sigma.coef
   sigma.table <- cbind(
-    Estimate = object$sigma.coef,
+    Estimate = as.numeric(sigma),
     StdErr = sqrt(object$sigma.var)
   )
-  rownames(sigma.table) <- object$namesRand
+  rownames(sigma.table) <- names(sigma)
 
   Chi <- object$null.deviance - object$deviance
   Chi.p.value <- 1 - pchisq(Chi, object$null.df - object$df)
 
   res <- list(
     call = object$call,
+    model = if (!is.null(object$model)) object$model else .bb_model_lines_mm(object$nDim, object$namesRand),
     fixed.coefficients = fixed.TAB,
+    beta.table = fixed.TAB,
     sigma.table = sigma.table,
+    Sigma = object$Sigma,
+    Corr = object$Corr,
+    phi.table = phi.table,
     psi.table = psi.table,
-    random.coef = object$random.coef,
+    random.coef = if (!is.null(object$u)) object$u else object$random.coef,
+    u = if (!is.null(object$u)) object$u else object$random.coef,
     iter = object$iter,
     nObs = object$nObs,
     nRand = object$nRand,
@@ -371,7 +623,10 @@ summary.BBmm <- function(object, ...) {
     balanced = object$balanced,
     m = object$m,
     conv = object$conv,
-    nll = object$nll
+    nll = object$nll,
+    method = object$method,
+    fixed.formula = object$fixed.formula,
+    random.formula = object$random.formula
   )
   class(res) <- "summary.BBmm"
   res
@@ -381,35 +636,51 @@ summary.BBmm <- function(object, ...) {
 print.summary.BBmm <- function(x, ...) {
   cat("Call:\t")
   print(x$call)
-  cat("\nFixed effects coefficients:\n\n")
-  printCoefmat(x$fixed.coefficients, P.values = TRUE, has.Pvalue = TRUE)
+  .cat_model_block("Model (BBmm):", x$model)
+  cat("beta (fixed effects):\n\n")
+  printCoefmat(x$beta.table, P.values = TRUE, has.Pvalue = TRUE)
   cat("\n---------------------------------------------------------------\n")
-  cat("Random effects dispersion parameter(s):\n\n")
+  cat("sigma (RE SD):\n\n")
   print(x$sigma.table)
+  if (!is.null(x$Corr) && length(x$Corr)) {
+    for (nm in names(x$Corr)) {
+      C <- x$Corr[[nm]]
+      if (is.matrix(C) && nrow(C) > 1L) {
+        cat("\nCorr (", nm, "):\n", sep = "")
+        print(round(C, 3))
+      }
+    }
+  }
   cat("\n---------------------------------------------------------------\n")
-  cat("Logarithm of beta-binomial dispersion parameter log(phi):\n\n")
-  print(x$psi.table)
+  cat("phi (BB dispersion) and log(phi):\n\n")
+  print(x$phi.table)
   cat("\n---------------------------------------------------------------\n")
-  cat("Deviance of the model:", x$deviance, "; with", x$df, "degrees of freedom.\n")
-  cat("Deviance of the null model", x$null.deviance, "; with", x$null.df, "degrees of freedom.\n")
-  cat("Deviance goodness-of-fit test p-value:", x$Goodness.of.fit, "\n")
+  cat("Deviance:", x$deviance, "; df =", x$df, "\n")
+  cat("Null deviance:", x$null.deviance, "; df =", x$null.df, "\n")
+  cat("Deviance goodness-of-fit p-value:", x$Goodness.of.fit, "\n")
   if (!is.null(x$nll)) cat("Laplace approx. nll:", x$nll, "\n")
   cat("\nNumber of observations:", x$nObs)
   cat("\nNumber of iterations:", x$iter)
   if (x$balanced == "yes") {
-    cat("\nBalanced data, maximum score number:", x$m)
+    cat("\nBalanced data, m =", x$m)
   } else {
-    cat("\nNo balanced data.")
+    cat("\nUnbalanced m.")
   }
-  cat("\nNumber of random effects in each random component:", x$nRandComp, "\n\n")
+  cat("\nRE counts per component (nRandComp):", paste(x$nRandComp, collapse = ", "), "\n\n")
   invisible(x)
 }
 
 #' @export
-coef.BBmm <- function(object, ...) object$fixed.coef
+coef.BBmm <- function(object, ...) {
+  if (!is.null(object$beta)) return(object$beta)
+  object$fixed.coef
+}
 
 #' @export
 vcov.BBmm <- function(object, ...) object$fixed.vcov
 
 #' @export
-fitted.BBmm <- function(object, ...) object$fitted.values
+fitted.BBmm <- function(object, ...) {
+  if (!is.null(object$p)) return(object$p)
+  object$fitted.values
+}

@@ -1,14 +1,4 @@
-// Beta-binomial mixed-effects model (BBmm).
-// y | u ~ BB(m, p, phi), logit(p) = X beta + Z u
-//
-// Random effects are organized in independent "blocks" (grouping factors).
-// Block b has G_b groups and q_b terms per group. Within a group:
-//   u_g ~ N(0, Sigma_b)
-// with Sigma_b either diagonal (corr_type=0) or unstructured (corr_type=1).
-//
-// u is stored interleaved within each block:
-//   (g=0,t=0), (g=0,t=1), ..., (g=0,t=q-1), (g=1,t=0), ...
-// Blocks are concatenated in Z / u.
+// BBmm with weak priors on fixed effects / RE covariance params (method='bayes').
 #include <TMB.hpp>
 
 template <class Type>
@@ -22,14 +12,12 @@ Type dbetabinom_log(Type y, Type m, Type p, Type phi) {
   return out;
 }
 
-// Number of unconstrained params for one Sigma (q x q)
 template <class Type>
 int n_theta_sigma(int q, int corr_type) {
-  if (corr_type == 0) return q;                 // log SDs
-  return q * (q + 1) / 2;                       // lower Chol
+  if (corr_type == 0) return q;
+  return q * (q + 1) / 2;
 }
 
-// Build Sigma from unconstrained theta slice; also fill sd vector length q
 template <class Type>
 matrix<Type> sigma_from_theta(vector<Type> theta, int q, int corr_type,
                               vector<Type> &sd_out) {
@@ -42,7 +30,6 @@ matrix<Type> sigma_from_theta(vector<Type> theta, int q, int corr_type,
       Sigma(t, t) = s * s;
     }
   } else {
-    // Lower-triangular Chol L: diag = exp(theta), strict lower = free
     matrix<Type> L(q, q);
     L.setZero();
     int k = 0;
@@ -67,27 +54,34 @@ Type objective_function<Type>::operator()() {
   DATA_MATRIX(Z);
   DATA_IVECTOR(dim_id);
   DATA_INTEGER(nDim);
-
-  // RE block metadata
   DATA_INTEGER(n_blocks);
-  DATA_IVECTOR(block_G);      // length n_blocks
-  DATA_IVECTOR(block_q);      // length n_blocks
-  DATA_IVECTOR(block_corr);   // 0=diag, 1=us
-  DATA_IVECTOR(block_theta0); // start index into theta_re for each block
+  DATA_IVECTOR(block_G);
+  DATA_IVECTOR(block_q);
+  DATA_IVECTOR(block_corr);
+  DATA_IVECTOR(block_theta0);
 
   PARAMETER_VECTOR(beta);
-  PARAMETER_VECTOR(log_phi);   // length nDim
-  PARAMETER_VECTOR(theta_re);  // packed RE covariance params
-  PARAMETER_VECTOR(u);         // random effects (Laplace)
+  PARAMETER_VECTOR(log_phi);
+  PARAMETER_VECTOR(theta_re);
+  PARAMETER_VECTOR(u);
 
   int n = y.size();
   Type nll = Type(0);
+
+  for (int j = 0; j < beta.size(); j++) {
+    nll -= dnorm(beta(j), Type(0), Type(5), true);
+  }
+  for (int d = 0; d < nDim; d++) {
+    nll -= dnorm(log_phi(d), Type(log(0.3)), Type(1.0), true);
+  }
+  for (int k = 0; k < theta_re.size(); k++) {
+    nll -= dnorm(theta_re(k), Type(0), Type(1.0), true);
+  }
 
   vector<Type> phi(nDim);
   for (int d = 0; d < nDim; d++) phi(d) = exp(log_phi(d));
 
   vector<Type> eta = X * beta + Z * u;
-
   Type eps = Type(1e-8);
   for (int i = 0; i < n; i++) {
     Type p = Type(1) / (Type(1) + exp(-eta(i)));
@@ -97,7 +91,6 @@ Type objective_function<Type>::operator()() {
     nll -= dbetabinom_log(y(i), m(i), p, phi(d));
   }
 
-  // Random-effect densities by block / group
   int u_offset = 0;
   for (int b = 0; b < n_blocks; b++) {
     int G = block_G(b);
@@ -106,7 +99,6 @@ Type objective_function<Type>::operator()() {
     int nt = n_theta_sigma<Type>(q, corr);
     vector<Type> th(nt);
     for (int k = 0; k < nt; k++) th(k) = theta_re(block_theta0(b) + k);
-
     vector<Type> sd(q);
     matrix<Type> Sigma = sigma_from_theta(th, q, corr, sd);
 
@@ -124,16 +116,6 @@ Type objective_function<Type>::operator()() {
         nll += mvn(ug);
       }
     }
-
-    // Report per-block SD / correlation for first block terms via ADREPORT later
-    if (b == 0) {
-      ADREPORT(sd);
-      if (q == 2 && corr == 1) {
-        Type rho = Sigma(0, 1) / (sd(0) * sd(1) + Type(1e-12));
-        ADREPORT(rho);
-      }
-    }
-
     u_offset += G * q;
   }
 

@@ -10,7 +10,7 @@ Reimplementation of [PROreg](https://cran.r-project.org/package=PROreg) beta-bin
 | `BBest` (MM + MLE) | done |
 | `BBreg` (marginal BB logistic) | done (TMB) |
 | `BBmm` (mixed effects + Laplace) | done (TMB) |
-| Multidimensional `BBmm` (`nDim`) | done (basic) |
+| Multidimensional `BBmm` (shared latent) | done (`cbind` / `dim=`) |
 | `BBjm` one-stage joint (BB + Weibull) | done (TMB) |
 
 ## Install
@@ -55,11 +55,69 @@ eta <- 0.5 - 0.4 * x + u[z]
 y <- rBB(length(x), m, 1/(1+exp(-eta)), phi = 0.15)
 dat <- data.frame(y, x, z)
 
-fit_mm <- BBmm(y ~ x, random.formula = ~ z, m = m, data = dat)
+fit_mm <- BBmm(y ~ x, random = ~ (1 | z), m = m, data = dat)
 summary(fit_mm)
+
+# Formulation-aligned fields (PROreg aliases still work):
+fit_mm$beta; fit_mm$phi; fit_mm$sigma; fit_mm$u   # primary
+fit_mm$fixed.coef; fit_mm$phi.coef; fit_mm$sigma.coef; fit_mm$random.coef
+fit_mm$model   # character lines of the statistical model
 ```
 
-For multiple crossed factors use e.g. `random.formula = ~ site + doc`. For a custom `Z`, pass `Z` and `nRandComp` instead of `random.formula`.
+For multiple crossed factors use e.g. `random = ~ (1 | site) + (1 | doc)`
+(or legacy `random.formula = ~ site + doc`).
+
+### Random intercept + random slope
+
+```r
+fit_rs <- BBmm(
+  y ~ time, random = ~ (1 + time | id),
+  corr = "unstructured",   # or "us"; aliases: "cor", "correlated"
+  m = m, data = dat
+)
+fit_rs$sigma; fit_rs$Corr$id; fit_rs$Sigma$id
+```
+
+### Multivariate shared latent (canonical API)
+
+\[
+\operatorname{logit}(p_{ij}^{(\ell)})
+= x_{ij}^{(\ell)\top}\beta^{(\ell)} + z_{ij}^{\top} a_i,
+\quad a_i \sim N(0,G).
+\]
+
+**Wide / cross-sectional** (`cbind`):
+
+```r
+BBmm(
+  cbind(y1, y2, y3) ~ x,
+  random = ~ (1 | id),
+  m = c(20, 10, 4),
+  data = dat
+)
+```
+
+**Long / longitudinal** (`dim =` names the domain column \(\ell\)):
+
+```r
+BBmm(
+  y ~ x + time,
+  random = ~ (1 + time | id),
+  dim = "domain",
+  corr = "unstructured",
+  m = "m",
+  data = long
+)
+```
+
+Advanced manual stacking remains available via `multi_bb_stack()` (not the preferred interface).
+
+**Parameter names (math ↔ object)**
+
+| Model | Math | Primary fields | PROreg-compatible aliases |
+|-------|------|----------------|---------------------------|
+| `BBreg` | \(\beta\), \(\phi\), \(p\) | `$beta`, `$phi`, `$p` | `$coefficients`, `$fitted.values` |
+| `BBmm` | \(\beta\), \(a\)/\(u\), \(G\), \(\phi\) | `$beta`, `$u`, `$sigma`, `$Sigma`, `$Corr`, `$phi` | `$fixed.coef`, `$random.coef`, `$sigma.coef`, `$phi.coef` |
 
 ### One-stage joint model (`BBjm`)
 
