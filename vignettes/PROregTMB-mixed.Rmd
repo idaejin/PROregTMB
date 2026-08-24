@@ -162,12 +162,87 @@ fit_l$beta
 fit_l$phi
 ```
 
+## M2 / M3: domain-specific random effects
+
+Long format only. Indicator RE per domain for each subject
+\(\mathbf{u}_i\sim N(0,\Sigma)\):
+
+```{r multi-M3, eval=FALSE}
+# M3: correlated domain RE (BB-GAM primary model)
+BBmm(
+  y ~ x,
+  random = ~ (0 + domain | id),
+  dim = "domain",
+  corr = "unstructured",
+  m = "m",
+  data = long
+)
+
+# M2: independent domain RE
+BBmm(
+  y ~ x,
+  random = ~ (0 + domain | id),
+  dim = "domain",
+  corr = "diag",
+  m = "m",
+  data = long
+)
+```
+
+Inspect \(G=\Sigma\) with `fit$Sigma$id` and `fit$Corr$id`.  
+M1 remains `random = ~ (1 | id)` (shared intercept).
+
 Low-level stacking remains available via `multi_bb_stack()` for advanced use.
+
+## Shared P-splines across dimensions
+
+Additive `s()` terms are **shared** across outcomes (same \(f_j\) for every
+\(\ell\)), consistent with the shared latent \(a_i\):
+
+```{r multi-pspline}
+set.seed(46)
+n <- 70
+id <- factor(seq_len(n))
+x <- runif(n)
+a <- rnorm(n, 0, 0.5)
+f <- sin(2 * pi * x)
+dat_s <- data.frame(
+  id = id,
+  x = x,
+  y1 = rBB(n, 20L, 1 / (1 + exp(-(0.1 + f + a))), 0.18),
+  y2 = rBB(n, 10L, 1 / (1 + exp(-(-0.2 + f + a))), 0.22)
+)
+
+fit_s <- BBmm(
+  cbind(y1, y2) ~ s(x, ndx = 10, pord = 2),
+  random = ~ (1 | id),
+  m = c(20, 10),
+  data = dat_s
+)
+fit_s$lambda
+sum(fit_s$fhat[[1]])
+```
+
+Long format works the same way: `y ~ s(x)` with `dim = "domain"` (shared),
+or domain-specific smooths:
+
+```r
+BBmm(
+  y ~ hclus4 + s(wt, by = dim, k = 8) + s(fev1p, by = dim, k = 8),
+  random = ~ (1 | id),
+  dim = "dim",
+  m = "m",
+  data = long
+)
+```
+
+COPD SGRQ port (BB-GAM `fit_pspline_M123` → this API):  
+`scripts/fit_COPD_multi_pspline.R`.
 
 # Notes
 
 - Prefer `random = ~ (1 | id)` over legacy `random.formula = ~ id`.
 - Weak RE / large \(\phi\) / few groups: Laplace ML may shrink \(\sigma\to 0\)
   while PROreg's h-likelihood keeps a small positive value.
-- Additive P-splines can be combined with subject RE; see the P-splines
-  vignette (Marra–Wood 2012 pointwise bands via `plot_smooth()`).
+- Additive P-splines (univariate or shared multivariate) are documented in the
+  P-splines vignette (`plot_smooth()` for pointwise bands).

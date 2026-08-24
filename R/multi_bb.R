@@ -154,9 +154,8 @@ multi_bb_stack <- function(y_list, x = NULL, formula_list = NULL,
       stop("Response in fixed.formula not found in data", call. = FALSE)
     }
 
-    rhs <- .rhs_formula(fixed.formula)
-    tl <- setdiff(attr(stats::terms(rhs), "term.labels"), dim)
-    rhs <- if (length(tl)) stats::reformulate(tl) else ~ 1
+    # Parametric X only; s() built later on the stacked long rows
+    rhs <- .parametric_rhs(fixed.formula, drop = dim)
 
     m_raw <- .resolve_m_from_data(m, data_o, nrow(data_o))
     if (length(m_raw) == 1L) m_raw <- rep(as.numeric(m_raw), nrow(data_o))
@@ -214,7 +213,8 @@ multi_bb_stack <- function(y_list, x = NULL, formula_list = NULL,
     n <- nrow(Y)
     y_list <- lapply(seq_len(L), function(l) as.numeric(Y[, l]))
     names(y_list) <- dim_names
-    rhs <- .rhs_formula(fixed.formula)
+    # Parametric X only; s() stacked after multi prep (shared across dims)
+    rhs <- .parametric_rhs(fixed.formula)
     formula_list <- replicate(L, rhs, simplify = FALSE)
 
     # grouping factor from random

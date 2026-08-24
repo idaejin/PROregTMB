@@ -1,23 +1,68 @@
-## Additive P-splines for BBreg / BBmm (Eilers & Marx + sum-to-zero)
-##
-## Model (additive on the logit scale):
-##   logit(p) = X beta + sum_j f_j(x_j),   f_j = B_j gamma_j
-##
-## Penalty per smooth (as in pspline_additive.R / _ci.R):
-##   lambda_j * || D_{pord} gamma_j ||^2
-##   + kappa * || 1' B_j gamma_j ||^2     # sum_i f_j(x_ij) = 0
-##
-## In TMB: gamma_j ~ GMRF(Q_j),  Q_j = lambda_j S_j + kappa C_j,
-## with S_j = D'D and C_j = (B_j'1)(1'B_j); lambda_j via Laplace.
+## Eilers–Marx P-splines via mixed-model reparameterisation
+## (Eilers 1999; same engine as BB-GAM / Report 4):
+##   f(x) = X_null beta_null + Z s,   s ~ N(0, sigma_s^2 I)
+##   Z = B D' (D D')^{-1}, residualised against the fixed design.
+## Difference from the former GMRF-on-B path: the polynomial null space
+## lives in X (once), not inside a penalised GMRF.
 
-#' B-spline basis (Eilers & Marx, equally spaced knots)
+#' Truncated power (Eilers & Marx)
+#' @keywords internal
+.tpower <- function(x, t, p) (x - t)^p * (x > t)
+
+#' B-spline via truncated powers (BB-GAM notes)
+#' @keywords internal
+.bspline_eilers <- function(x, xl, xr, ndx, bdeg) {
+  dx <- (xr - xl) / ndx
+  knots <- seq(xl - bdeg * dx, xr + bdeg * dx, by = dx)
+  P <- outer(x, knots, .tpower, bdeg)
+  n <- ncol(P)
+  Dd <- diff(diag(n), diff = bdeg + 1) / (gamma(bdeg + 1) * dx^bdeg)
+  B <- (-1)^(bdeg + 1) * P %*% t(Dd)
+  list(B = B, knots = knots, dx = dx, xl = xl, xr = xr, ndx = ndx, bdeg = bdeg)
+}
+
+#' @keywords internal
+.diff_penalty_eilers <- function(n_basis, pord = 2L) {
+  diff(diag(as.integer(n_basis)), differences = as.integer(pord))
+}
+
+#' Eilers Z = B D'(DD')^{-1}
+#' @keywords internal
+.eilers_Z <- function(B, D) {
+  Z <- B %*% t(D) %*% solve(tcrossprod(D))
+  colnames(Z) <- paste0("z", seq_len(ncol(Z)))
+  Z
+}
+
+#' Residualise Z against X (X'Z ≈ 0)
+#' @keywords internal
+.orth_to_X <- function(Z, X) {
+  X <- as.matrix(X)
+  Z <- as.matrix(Z)
+  if (!ncol(Z) || !nrow(X)) return(Z)
+  Q <- qr.Q(qr(X))
+  Z - Q %*% crossprod(Q, Z)
+}
+
+#' Drop near-zero / dependent columns
+#' @keywords internal
+.reduce_Z_rank <- function(Z, tol = 1e-8) {
+  Z <- as.matrix(Z)
+  if (!ncol(Z)) return(Z)
+  nrm <- sqrt(colSums(Z * Z))
+  keep <- nrm > tol * max(nrm, 1)
+  Z <- Z[, keep, drop = FALSE]
+  if (!ncol(Z)) return(Z)
+  qrz <- qr(Z, tol = tol)
+  Z[, qrz$pivot[seq_len(qrz$rank)], drop = FALSE]
+}
+
+#' B-spline basis (Eilers & Marx, equally spaced knots) — public helper
 #'
-#' @param x Covariate values.
-#' @param xl,xr Left/right boundaries (default range of `x`).
-#' @param ndx Number of equal-width intervals on \eqn{[xl, xr]} (Eilers).
-#' @param bdeg B-spline degree (default 3 = cubic).
-#' @param nseg Deprecated alias of `ndx`.
-#' @return Basis matrix with attributes `ndx`, `bdeg`, `xl`, `xr`, `knots`.
+#' Uses \pkg{splines} `splineDesign` (compatible with earlier PROregTMB API).
+#' The model engine uses the truncated-power construction internally.
+#'
+#' @inheritParams bbase
 #' @export
 bbase <- function(x, xl = min(x, na.rm = TRUE), xr = max(x, na.rm = TRUE),
                   ndx = 10L, bdeg = 3L, nseg = NULL) {
@@ -42,11 +87,6 @@ bbase <- function(x, xl = min(x, na.rm = TRUE), xr = max(x, na.rm = TRUE),
 }
 
 #' Difference penalty matrix S = D'D (Eilers & Marx)
-#'
-#' @param K Basis dimension.
-#' @param pord Difference / penalty order (default 2).
-#' @param d Deprecated alias of `pord`.
-#' @return Symmetric `K x K` penalty matrix.
 #' @export
 penalty_diff <- function(K, pord = 2L, d = NULL) {
   K <- as.integer(K)
@@ -57,13 +97,7 @@ penalty_diff <- function(K, pord = 2L, d = NULL) {
   crossprod(D)
 }
 
-#' Rank-1 sum-to-zero centering penalty C = (B'1)(1'B)
-#'
-#' Enforces \eqn{1^\top B\gamma \approx 0} (mean of the smooth at the
-#' observed design is zero), as in the additive P-spline notes.
-#'
-#' @param B Basis matrix (n x K).
-#' @return Symmetric `K x K` matrix.
+#' Rank-1 sum-to-zero centering penalty (legacy helper; unused by Eilers engine)
 #' @export
 penalty_center <- function(B) {
   B <- as.matrix(B)
@@ -73,19 +107,23 @@ penalty_center <- function(B) {
 
 #' P-spline smooth term (Eilers notation)
 #'
-#' @param x Numeric covariate (univariate).
-#' @param ndx Number of equal intervals on the covariate domain.
-#' @param pord Order of the difference penalty (default 2).
+#' Engine: mixed-model map \eqn{Z = B D'(DD')^{-1}} with polynomial null
+#' space in the fixed design (Eilers 1999), matching BB-GAM / Report 4.
+#'
+#' @param x Numeric covariate.
+#' @param ndx Number of equal intervals (or set `k` = basis dimension).
+#' @param pord Difference penalty order (default 2).
 #' @param bdeg B-spline degree (default 3).
 #' @param xl,xr Optional knot boundaries.
+#' @param by Optional grouping factor (domain-specific smooths).
+#' @param k Basis dimension; if `ndx` missing, `ndx = k - bdeg`.
 #' @param ... Ignored.
 #' @export
 s <- function(x, ndx = 10L, pord = 2L, bdeg = 3L,
-              xl = NULL, xr = NULL, ...) {
+              xl = NULL, xr = NULL, by = NULL, k = NULL, ...) {
   as.numeric(x)
 }
 
-#' Split formula into parametric part and s() smooth calls
 #' @keywords internal
 .parse_smooth_formula <- function(formula) {
   if (!inherits(formula, "formula")) {
@@ -113,9 +151,18 @@ s <- function(x, ndx = 10L, pord = 2L, bdeg = 3L,
   list(fixed = fixed, s_calls = s_calls, s_labels = labs[is_s])
 }
 
-#' Evaluate one s() call into basis + penalties
 #' @keywords internal
-.eval_s_call <- function(cl, data, envir = parent.frame()) {
+.parametric_rhs <- function(formula, drop = character()) {
+  parts <- .parse_smooth_formula(formula)
+  tl <- attr(stats::terms(parts$fixed), "term.labels")
+  tl <- setdiff(tl, drop)
+  if (!length(tl)) return(~ 1)
+  stats::reformulate(tl)
+}
+
+#' Parse one s() call (covariate + args); no basis yet
+#' @keywords internal
+.parse_s_call <- function(cl, data, envir = parent.frame()) {
   if (!is.call(cl) || !identical(cl[[1L]], as.name("s"))) {
     stop("expected a call to s()", call. = FALSE)
   }
@@ -130,45 +177,52 @@ s <- function(x, ndx = 10L, pord = 2L, bdeg = 3L,
     if (name %in% names(args)) eval(args[[name]], envir = data, enclos = envir)
     else default
   }
+  bdeg <- as.integer(get_arg("bdeg", 3L))
   ndx <- get_arg("ndx", NULL)
   if (is.null(ndx)) ndx <- get_arg("nseg", NULL)
-  if (is.null(ndx)) ndx <- get_arg("k", 10L)
+  if (is.null(ndx)) {
+    k_basis <- get_arg("k", NULL)
+    if (!is.null(k_basis)) {
+      ndx <- as.integer(k_basis) - bdeg
+      if (ndx < 1L) stop("k must be > bdeg", call. = FALSE)
+    } else ndx <- 10L
+  }
   pord <- get_arg("pord", NULL)
   if (is.null(pord)) pord <- get_arg("m", 2L)
   if (is.null(pord)) pord <- get_arg("d", 2L)
-  bdeg <- as.integer(get_arg("bdeg", 3L))
-  ndx <- as.integer(ndx)
-  pord <- as.integer(pord)
   xl <- get_arg("xl", NULL)
   xr <- get_arg("xr", NULL)
-  if (is.null(xl)) xl <- min(x)
-  if (is.null(xr)) xr <- max(x)
+  eps <- as.numeric(get_arg("eps", 0.01))
+  if (is.null(xl)) xl <- min(x) - eps
+  if (is.null(xr)) xr <- max(x) + eps
   if (xr <= xl) xr <- xl + 1e-6
 
-  B <- bbase(x, xl = xl, xr = xr, ndx = ndx, bdeg = bdeg)
-  K <- ncol(B)
-  S <- penalty_diff(K, pord = pord)
-  C <- penalty_center(B)
+  by_expr <- if ("by" %in% names(args)) args[["by"]] else NULL
+  by_fac <- NULL
+  by_name <- NA_character_
+  if (!is.null(by_expr)) {
+    by_fac <- droplevels(as.factor(eval(by_expr, envir = data, enclos = envir)))
+    if (length(by_fac) != length(x)) {
+      stop("by= length must match covariate", call. = FALSE)
+    }
+    by_name <- paste(deparse(by_expr, width.cutoff = 500L), collapse = "")
+  }
+
   list(
-    label = paste0("s(", xname, ")"),
-    xname = xname,
-    x = x,
-    ndx = ndx,
-    pord = pord,
-    bdeg = bdeg,
-    xl = xl,
-    xr = xr,
-    knots = attr(B, "knots"),
-    B = B,
-    S = S,
-    C = C,
-    K = K
+    x = x, xname = xname, x_expr = x_expr,
+    ndx = as.integer(ndx), pord = as.integer(pord), bdeg = bdeg,
+    xl = xl, xr = xr, by_fac = by_fac, by_name = by_name
   )
 }
 
-#' Build additive smooth design: stacked B, block-diag S and C
+#' Build Eilers mixed smooth design from a formula
+#'
+#' @return list with `fixed`, `X_null` (linear null pieces not already named
+#'   in a later merge), `Zs`, `s_comp`, `n_smooth`, `labels`, `specs`,
+#'   `engine = "eilers"`.
 #' @keywords internal
-.build_smooth_design <- function(formula, data, envir = parent.frame()) {
+.build_smooth_design <- function(formula, data, envir = parent.frame(),
+                                 orth_Z = TRUE) {
   parts <- .parse_smooth_formula(formula)
   if (is.null(data) || (is.list(data) && !is.data.frame(data) && !length(data))) {
     av <- all.vars(formula)
@@ -178,114 +232,288 @@ s <- function(x, ndx = 10L, pord = 2L, bdeg = 3L,
     data <- as.data.frame(data)
   }
   n <- nrow(data)
-  if (!length(parts$s_calls)) {
-    return(list(
-      fixed = parts$fixed,
-      n_smooth = 0L,
-      B = matrix(0, n, 0L),
-      S = matrix(0, 0L, 0L),
-      C = matrix(0, 0L, 0L),
-      smooth_K = integer(0),
-      smooth_off = integer(0),
-      specs = list(),
-      labels = character(),
-      blocks_idx = list()
-    ))
+  empty <- list(
+    fixed = parts$fixed,
+    n_smooth = 0L,
+    engine = "eilers",
+    X_null = matrix(0, n, 0L),
+    Zs = matrix(0, n, 0L),
+    s_comp = integer(0),
+    smooth_K = integer(0),
+    labels = character(),
+    specs = list(),
+    blocks_idx = list(),
+    # legacy aliases so old checks don't explode
+    B = matrix(0, n, 0L),
+    S = matrix(0, 0L, 0L),
+    C = matrix(0, 0L, 0L)
+  )
+  if (!length(parts$s_calls)) return(empty)
+
+  parsed <- lapply(parts$s_calls, .parse_s_call, data = data, envir = envir)
+
+  # Null-space linear terms (pord = 2): one column per covariate for shared
+  # s(x); for s(x, by = g), one column per level, named "level.x" with
+  # values x * I(g == level). Domain-specific by= therefore matches a
+  # fully domain-specific mixed P-spline (linear null + wiggly).
+  X_null_cols <- list()
+  for (j in seq_along(parsed)) {
+    pj <- parsed[[j]]
+    if (is.null(pj$by_fac)) {
+      nm <- pj$xname
+      if (!nm %in% names(X_null_cols)) {
+        X_null_cols[[nm]] <- matrix(pj$x, ncol = 1L, dimnames = list(NULL, nm))
+      }
+    } else {
+      for (lev in levels(pj$by_fac)) {
+        nm <- paste0(lev, ".", pj$xname)
+        w <- as.numeric(pj$by_fac == lev)
+        X_null_cols[[nm]] <- matrix(
+          pj$x * w, ncol = 1L, dimnames = list(NULL, nm)
+        )
+      }
+    }
   }
-  specs <- lapply(parts$s_calls, .eval_s_call, data = data, envir = envir)
-  labels <- vapply(specs, `[[`, character(1), "label")
-  B <- do.call(cbind, lapply(specs, `[[`, "B"))
-  S <- as.matrix(Matrix::bdiag(lapply(specs, `[[`, "S")))
-  C <- as.matrix(Matrix::bdiag(lapply(specs, `[[`, "C")))
+  X_null <- if (length(X_null_cols)) {
+    do.call(cbind, X_null_cols)
+  } else {
+    matrix(0, n, 0L)
+  }
+
+  # Temporary X for orthogonalisation: intercept + null + will merge later
+  # Callers should re-orth against full model X; we orth against null+1 here
+  # and BBreg/BBmm re-orth against cbind(X_param, X_null) after merge.
+  X_tmp <- cbind("(Intercept)" = rep(1, n), X_null)
+
+  specs <- list()
+  Z_list <- list()
+  labels <- character()
+  s_comp <- integer()
+  comp_id <- 0L
+
+  for (j in seq_along(parsed)) {
+    pj <- parsed[[j]]
+    bb <- .bspline_eilers(pj$x, pj$xl, pj$xr, pj$ndx, pj$bdeg)
+    D <- .diff_penalty_eilers(ncol(bb$B), pj$pord)
+    Z_raw <- .eilers_Z(bb$B, D)
+
+    if (is.null(pj$by_fac)) {
+      lab <- paste0("s(", pj$xname, ")")
+      Zj <- .orth_to_X(Z_raw, X_tmp)
+      Zj <- .reduce_Z_rank(Zj)
+      if (!ncol(Zj)) next
+      colnames(Zj) <- paste0(lab, ".", seq_len(ncol(Zj)))
+      Z_list[[length(Z_list) + 1L]] <- Zj
+      labels <- c(labels, lab)
+      s_comp <- c(s_comp, rep(comp_id, ncol(Zj)))
+      specs[[length(specs) + 1L]] <- list(
+        label = lab, xname = pj$xname, x = pj$x,
+        by_level = NA_character_, by_var = NA_character_,
+        ndx = pj$ndx, pord = pj$pord, bdeg = pj$bdeg,
+        xl = pj$xl, xr = pj$xr, D = D, B = bb$B,
+        K = ncol(Zj), null_name = pj$xname
+      )
+      comp_id <- comp_id + 1L
+    } else {
+      for (lev in levels(pj$by_fac)) {
+        lab <- paste0("s(", pj$xname, "):", lev)
+        w <- as.numeric(pj$by_fac == lev)
+        Zj <- Z_raw * w
+        Zj <- .orth_to_X(Zj, X_tmp)
+        Zj <- .reduce_Z_rank(Zj)
+        if (!ncol(Zj)) next
+        colnames(Zj) <- paste0(lab, ".", seq_len(ncol(Zj)))
+        Z_list[[length(Z_list) + 1L]] <- Zj
+        labels <- c(labels, lab)
+        s_comp <- c(s_comp, rep(comp_id, ncol(Zj)))
+        specs[[length(specs) + 1L]] <- list(
+          label = lab, xname = pj$xname, x = pj$x[w > 0],
+          by_level = lev, by_var = pj$by_name,
+          ndx = pj$ndx, pord = pj$pord, bdeg = pj$bdeg,
+          xl = pj$xl, xr = pj$xr, D = D, B = bb$B,
+          K = ncol(Zj),
+          null_name = paste0(lev, ".", pj$xname),
+          by_mask = w
+        )
+        comp_id <- comp_id + 1L
+      }
+    }
+  }
+
+  if (!length(Z_list)) {
+    empty$fixed <- parts$fixed
+    empty$X_null <- X_null
+    return(empty)
+  }
+
+  Zs <- do.call(cbind, Z_list)
+  # Joint rank reduction may drop columns; rebuild s_comp carefully
+  # (skip joint drop to keep s_comp aligned — orth already done)
+
   Ks <- vapply(specs, `[[`, integer(1), "K")
   off <- if (length(Ks) <= 1L) {
     if (length(Ks) == 1L) 0L else integer(0)
   } else {
     c(0L, cumsum(Ks[-length(Ks)]))
   }
-  blocks_idx <- lapply(seq_along(Ks), function(j) {
-    off[j] + seq_len(Ks[j])
-  })
-  colnames(B) <- unlist(lapply(seq_along(specs), function(j) {
-    paste0(labels[j], ".", seq_len(Ks[j]))
-  }))
+  blocks_idx <- lapply(seq_along(Ks), function(j) off[j] + seq_len(Ks[j]))
+
   list(
     fixed = parts$fixed,
     n_smooth = length(specs),
-    B = B,
-    S = S,
-    C = C,
+    engine = "eilers",
+    X_null = X_null,
+    Zs = Zs,
+    s_comp = as.integer(s_comp),
     smooth_K = as.integer(Ks),
     smooth_off = as.integer(off),
-    specs = specs,
     labels = labels,
-    blocks_idx = blocks_idx
+    specs = specs,
+    blocks_idx = blocks_idx,
+    B = Zs, # alias used by some nrow checks
+    S = matrix(0, 0L, 0L),
+    C = matrix(0, 0L, 0L)
   )
 }
 
-#' TMB data block for smooths
+#' Re-orthogonalise Zs against the full fixed design X
+#' @keywords internal
+.reorth_smooth_Zs <- function(sm, X) {
+  if (is.null(sm) || !isTRUE(sm$n_smooth > 0L)) return(sm)
+  Zs <- .orth_to_X(sm$Zs, X)
+  # rebuild by block to keep labels, dropping empty blocks
+  new_Z <- list()
+  new_specs <- list()
+  new_labels <- character()
+  new_comp <- integer()
+  comp <- 0L
+  for (j in seq_len(sm$n_smooth)) {
+    idx <- sm$blocks_idx[[j]]
+    Zj <- .reduce_Z_rank(Zs[, idx, drop = FALSE])
+    if (!ncol(Zj)) next
+    colnames(Zj) <- paste0(sm$labels[j], ".", seq_len(ncol(Zj)))
+    new_Z[[length(new_Z) + 1L]] <- Zj
+    sp <- sm$specs[[j]]
+    sp$K <- ncol(Zj)
+    new_specs[[length(new_specs) + 1L]] <- sp
+    new_labels <- c(new_labels, sm$labels[j])
+    new_comp <- c(new_comp, rep(comp, ncol(Zj)))
+    comp <- comp + 1L
+  }
+  if (!length(new_Z)) {
+    sm$n_smooth <- 0L
+    sm$Zs <- matrix(0, nrow(X), 0L)
+    sm$B <- sm$Zs
+    sm$s_comp <- integer(0)
+    sm$labels <- character()
+    sm$specs <- list()
+    sm$blocks_idx <- list()
+    sm$smooth_K <- integer(0)
+    return(sm)
+  }
+  Zs2 <- do.call(cbind, new_Z)
+  Ks <- vapply(new_specs, `[[`, integer(1), "K")
+  off <- if (length(Ks) <= 1L) 0L else c(0L, cumsum(Ks[-length(Ks)]))
+  if (length(Ks) == 0L) off <- integer(0)
+  sm$Zs <- Zs2
+  sm$B <- Zs2
+  sm$n_smooth <- length(new_specs)
+  sm$specs <- new_specs
+  sm$labels <- new_labels
+  sm$s_comp <- as.integer(new_comp)
+  sm$smooth_K <- as.integer(Ks)
+  sm$smooth_off <- as.integer(off)
+  sm$blocks_idx <- lapply(seq_along(Ks), function(j) off[j] + seq_len(Ks[j]))
+  sm
+}
+
+#' Merge X_null columns into parametric X (skip name collisions)
+#' @keywords internal
+.merge_X_null <- function(X, X_null) {
+  if (is.null(X_null) || !ncol(X_null)) return(X)
+  cn <- colnames(X)
+  add <- setdiff(colnames(X_null), cn)
+  if (!length(add)) return(X)
+  # Skip a shared null name (e.g. "fev_w") when domain-prefixed versions
+  # already exist in X (e.g. "Impacts.fev_w"); do not drop domain-prefixed
+  # X_null columns that are the intended by= null space.
+  if (length(cn)) {
+    bare <- sub("^.*\\.", "", cn)
+    shared_add <- add[!grepl("\\.", add)]
+    drop_shared <- shared_add[shared_add %in% bare]
+    add <- setdiff(add, drop_shared)
+  }
+  if (!length(add)) return(X)
+  cbind(X, X_null[, add, drop = FALSE])
+}
+
+#' Stack Eilers smooth rows for wide multivariate (shared smooth)
+#' @keywords internal
+.rep_smooth_rows <- function(sm, L) {
+  L <- as.integer(L)
+  if (is.null(sm) || !isTRUE(sm$n_smooth > 0L) || L <= 1L) return(sm)
+  sm$Zs <- do.call(rbind, replicate(L, sm$Zs, simplify = FALSE))
+  sm$B <- sm$Zs
+  if (!is.null(sm$X_null) && ncol(sm$X_null)) {
+    sm$X_null <- do.call(rbind, replicate(L, sm$X_null, simplify = FALSE))
+  }
+  sm
+}
+
+#' TMB data block for Eilers smooths
 #' @keywords internal
 .tmb_smooth_data <- function(sm, n, kappa = 1e6) {
   if (is.null(sm) || sm$n_smooth < 1L) {
     return(list(
       n_smooth = 0L,
-      B = matrix(0, n, 0L),
-      S = matrix(0, 0L, 0L),
-      C = matrix(0, 0L, 0L),
-      smooth_K = integer(0),
-      smooth_off = integer(0),
-      kappa = as.numeric(kappa)
+      Zs = matrix(0, n, 0L),
+      s_comp = integer(0)
     ))
   }
   list(
     n_smooth = as.integer(sm$n_smooth),
-    B = sm$B,
-    S = sm$S,
-    C = sm$C,
-    smooth_K = as.integer(sm$smooth_K),
-    smooth_off = as.integer(sm$smooth_off),
-    kappa = as.numeric(kappa)
+    Zs = as.matrix(sm$Zs),
+    s_comp = as.integer(sm$s_comp)
   )
 }
 
-#' TMB parameters for smooth block
+#' TMB parameters for Eilers smooth block
 #' @keywords internal
 .tmb_smooth_parameters <- function(sm) {
   if (is.null(sm) || sm$n_smooth < 1L) {
-    return(list(log_lambda = numeric(0), alpha = numeric(0)))
+    return(list(log_sds = numeric(0), s = numeric(0)))
   }
   list(
-    log_lambda = rep(log(10), sm$n_smooth),
-    alpha = rep(0, sum(sm$smooth_K))
+    log_sds = rep(0, sm$n_smooth),
+    s = rep(0, ncol(sm$Zs))
   )
 }
 
-#' Predict an additive smooth with Marra–Wood (2012) pointwise bands
+#' Predict an additive smooth (Eilers mixed; wiggly + null if available)
 #'
-#' Pointwise Bayesian confidence intervals for a centered smooth
-#' \eqn{f_j(x)=b(x)^\top\gamma_j} as in Marra & Wood (2012), Biometrika:
-#' \deqn{\widehat f_j(x)\pm z_{1-\alpha/2}\sqrt{b(x)^\top V_{\gamma_j} b(x)},}
-#' where \eqn{V_{\gamma}} is the **marginal** Laplace / Bayesian posterior
-#' covariance of the spline coefficients from TMB's joint precision
-#' (Wahba–Silverman prior induced by the P-spline penalty). These bands
-#' target good *across-the-function* frequentist coverage.
+#' Pointwise bands use the marginal Laplace covariance from TMB
+#' \code{jointPrecision}. With \code{centered = TRUE} (recommended for
+#' within WW--BW displays), the target is the contrast
+#' \eqn{f(x)-f(0)} and the SE uses the joint covariance of the null-space
+#' linear coefficient and the wiggly coefficients \eqn{s} for that smooth
+#' (fixed--random cross terms included; hyperparameters held at their MLE).
 #'
 #' @param object A `BBreg` or `BBmm` fit with smooths.
 #' @param which Integer index or label of the smooth.
 #' @param x Optional grid; default uses observed covariate.
 #' @param level Confidence level (default 0.95).
-#' @param se If `TRUE` (default), attach Marra–Wood `se`, `lwr`, `upr`.
-#' @param method Only `"marrawood"` (default) is implemented; accepted for
-#'   API clarity.
+#' @param se If `TRUE` (default), attach `se`, `lwr`, `upr`.
+#' @param centered If `TRUE`, return \eqn{f(x)-f(0)} with joint SE; if `FALSE`,
+#'   return the uncentered smooth (wiggly SE only, legacy).
+#' @param method Kept for API compatibility (`"marrawood"`).
 #' @return Data frame with `x`, `fit`, and usually `se`, `lwr`, `upr`.
 #' @references
-#' Marra, G. and Wood, S. N. (2012). Coverage properties of confidence
-#' intervals for generalized additive model components. *Scandinavian
-#' Journal of Statistics*, 39, 53–74.
+#' Eilers, P. H. C. (1999). Discussion of Currie & Durban. JRSS-C.
+#' Marra, G. and Wood, S. N. (2012). Scand J Statist 39, 53–74.
 #' @export
-#' @seealso [plot_smooth()]
 predict_smooth <- function(object, which = 1L, x = NULL, level = 0.95,
-                           se = TRUE, method = c("marrawood")) {
+                           se = TRUE, centered = FALSE,
+                           method = c("marrawood")) {
   method <- match.arg(method)
   sm <- object$smooth
   if (is.null(sm) || is.null(sm$n_smooth) || sm$n_smooth < 1L) {
@@ -301,47 +529,111 @@ predict_smooth <- function(object, which = 1L, x = NULL, level = 0.95,
 
   spec <- sm$specs[[j]]
   idx <- sm$blocks_idx[[j]]
-  alpha <- as.numeric(object$alpha)[idx]
+  s_hat <- as.numeric(object$s)[idx]
   if (is.null(x)) {
     x <- spec$x
   } else {
     x <- as.numeric(x)
   }
-  Bg <- bbase(x, xl = spec$xl, xr = spec$xr, ndx = spec$ndx, bdeg = spec$bdeg)
-  f <- as.numeric(Bg %*% alpha)
+
+  bb <- .bspline_eilers(x, spec$xl, spec$xr, spec$ndx, spec$bdeg)
+  Zg <- .eilers_Z(bb$B, spec$D)
+  if (ncol(Zg) > length(s_hat)) {
+    Zg <- Zg[, seq_len(length(s_hat)), drop = FALSE]
+  } else if (ncol(Zg) < length(s_hat)) {
+    Zg <- cbind(Zg, matrix(0, nrow(Zg), length(s_hat) - ncol(Zg)))
+  }
+  f_w <- as.numeric(Zg %*% s_hat)
+
+  # Null linear coefficient (shared or domain-prefixed)
+  b_null <- 0
+  bn <- spec$null_name
+  beta <- object$beta
+  null_nm <- NA_character_
+  if (!is.null(beta) && !is.null(bn)) {
+    cand <- c(
+      bn,
+      if (!is.null(spec$by_level) && !is.na(spec$by_level))
+        paste0(spec$by_level, ".", bn)
+    )
+    hit <- cand[cand %in% names(beta)]
+    if (length(hit)) {
+      null_nm <- hit[1]
+      b_null <- unname(beta[[null_nm]])
+    }
+  }
+  f_null <- b_null * x
+  f <- f_null + f_w
+
+  if (isTRUE(centered)) {
+    Z0 <- .eilers_Z(
+      .bspline_eilers(0, spec$xl, spec$xr, spec$ndx, spec$bdeg)$B,
+      spec$D
+    )
+    if (ncol(Z0) > length(s_hat)) {
+      Z0 <- Z0[, seq_len(length(s_hat)), drop = FALSE]
+    } else if (ncol(Z0) < length(s_hat)) {
+      Z0 <- cbind(Z0, matrix(0, 1L, length(s_hat) - ncol(Z0)))
+    }
+    f0 <- b_null * 0 + as.numeric(Z0 %*% s_hat)
+    f <- f - f0
+    Zd <- Zg - matrix(as.numeric(Z0), nrow(Zg), ncol(Zg), byrow = TRUE)
+  } else {
+    Zd <- Zg
+  }
 
   out <- data.frame(x = x, fit = f)
   if (!isTRUE(se)) return(out)
 
-  Vfull <- object$alpha.vcov
-  if (is.null(Vfull) && !is.null(object$sdreport)) {
-    n_u <- if (inherits(object, "BBmm")) object$nRand else 0L
-    Vfull <- .alpha_vcov_from_joint(
-      object$sdreport$jointPrecision,
-      n_alpha = length(object$alpha),
-      n_u = n_u
-    )
+  se_hat <- rep(NA_real_, length(x))
+  se_method <- "none"
+
+  if (isTRUE(centered)) {
+    meta <- .smooth_contrast_jp_index(object, j)
+    V <- NULL
+    if (!is.null(meta)) {
+      V <- .marginal_cov_from_joint(object$sdreport$jointPrecision, meta$idx)
+    }
+    if (!is.null(V) && all(is.finite(V))) {
+      if (isTRUE(meta$has_null)) {
+        C <- cbind(x, Zd)
+      } else {
+        C <- Zd
+      }
+      if (ncol(C) == ncol(V)) {
+        se_hat <- sqrt(pmax(0, rowSums((C %*% V) * C)))
+        se_method <- "joint_null_s"
+      }
+    }
   }
-  if (is.null(Vfull) && !is.null(object$obj)) {
-    sdr <- tryCatch(
-      TMB::sdreport(object$obj, getJointPrecision = TRUE),
-      error = function(e) NULL
-    )
-    if (!is.null(sdr)) {
+
+  if (se_method == "none") {
+    # Legacy / fallback: wiggly block only
+    Vfull <- object$s.vcov
+    if (is.null(Vfull) && !is.null(object$alpha.vcov)) Vfull <- object$alpha.vcov
+    if (is.null(Vfull) && !is.null(object$sdreport)) {
       n_u <- if (inherits(object, "BBmm")) object$nRand else 0L
       Vfull <- .alpha_vcov_from_joint(
-        sdr$jointPrecision,
-        n_alpha = length(object$alpha),
+        object$sdreport$jointPrecision,
+        n_alpha = length(object$s),
         n_u = n_u
       )
     }
+    if (!is.null(Vfull)) {
+      Vj <- Vfull[idx, idx, drop = FALSE]
+      if (all(is.finite(Vj))) {
+        se_hat <- as.numeric(smooth_se_cpp(Zd, Vj))
+        se_method <- if (isTRUE(centered)) "s_only_centered" else "marrawood"
+        # Partial upgrade: add null variance without cross term if available
+        if (isTRUE(centered) && !is.na(null_nm) && !is.null(object$fixed.vcov) &&
+            null_nm %in% rownames(object$fixed.vcov)) {
+          se_hat <- sqrt(pmax(0, se_hat^2 + (x^2) * object$fixed.vcov[null_nm, null_nm]))
+          se_method <- "s_plus_null_var"
+        }
+      }
+    }
   }
-  if (is.null(Vfull)) return(out)
 
-  Vj <- Vfull[idx, idx, drop = FALSE]
-  if (!all(is.finite(Vj))) return(out)
-
-  se_hat <- as.numeric(smooth_se_cpp(Bg, Vj))
   z <- stats::qnorm(1 - (1 - level) / 2)
   out$se <- se_hat
   out$lwr <- f - z * se_hat
@@ -349,27 +641,14 @@ predict_smooth <- function(object, which = 1L, x = NULL, level = 0.95,
   attr(out, "level") <- level
   attr(out, "which") <- j
   attr(out, "label") <- sm$labels[j]
-  attr(out, "method") <- "marrawood"
+  attr(out, "method") <- se_method
+  attr(out, "centered") <- isTRUE(centered)
   out
 }
 
-#' Plot an additive P-spline with Marra–Wood (2012) confidence bands
-#'
-#' Draws \eqn{\hat f_j} and a shaded pointwise Bayesian band
-#' (Marra & Wood, 2012). See [predict_smooth()].
-#'
-#' @param object A `BBreg` or `BBmm` fit with smooths.
-#' @param which Integer index or label of the smooth (or `"all"`).
-#' @param x Optional evaluation grid.
-#' @param level Confidence level.
-#' @param col Line color for the estimate.
-#' @param shade Band fill color.
-#' @param add If `TRUE`, add to the current plot (`which` must be length 1).
-#' @param xlab,ylab,main Axis labels / title (`NULL` = defaults).
-#' @param ylim y-limits; default spans band and fit.
-#' @param ... Passed to [graphics::plot()] / [graphics::lines()].
-#' @return Invisibly, the data frame from [predict_smooth()] (or a list if
-#'   `which = "all"`).
+#' Plot an additive P-spline with pointwise bands
+#' @inheritParams predict_smooth
+#' @param col,shade,add,xlab,ylab,main,ylim,... Plot options.
 #' @export
 plot_smooth <- function(object, which = "all", x = NULL, level = 0.95,
                         col = "darkorange2", shade = grDevices::adjustcolor(col, 0.30),
@@ -379,18 +658,12 @@ plot_smooth <- function(object, which = "all", x = NULL, level = 0.95,
   if (is.null(sm) || sm$n_smooth < 1L) {
     stop("object has no smooth terms", call. = FALSE)
   }
-  if (identical(which, "all")) {
-    which <- seq_len(sm$n_smooth)
-  }
+  if (identical(which, "all")) which <- seq_len(sm$n_smooth)
   if (length(which) > 1L) {
     if (isTRUE(add)) stop("add = TRUE requires a single smooth", call. = FALSE)
     n <- length(which)
-    nr <- 1L
-    nc <- n
-    if (n > 3L) {
-      nc <- ceiling(sqrt(n))
-      nr <- ceiling(n / nc)
-    }
+    nc <- if (n > 3L) ceiling(sqrt(n)) else n
+    nr <- ceiling(n / nc)
     op <- graphics::par(mfrow = c(nr, nc), mar = c(4, 4, 2.5, 1))
     on.exit(graphics::par(op), add = TRUE)
     out <- lapply(which, function(w) {
@@ -401,9 +674,7 @@ plot_smooth <- function(object, which = "all", x = NULL, level = 0.95,
     names(out) <- if (is.numeric(which)) sm$labels[which] else which
     return(invisible(out))
   }
-
-  pr <- predict_smooth(object, which = which, x = x, level = level, se = TRUE,
-                       method = "marrawood")
+  pr <- predict_smooth(object, which = which, x = x, level = level, se = TRUE)
   o <- order(pr$x)
   pr <- pr[o, , drop = FALSE]
   lab <- attr(pr, "label")
@@ -411,25 +682,18 @@ plot_smooth <- function(object, which = "all", x = NULL, level = 0.95,
   if (is.null(xlab)) xlab <- "x"
   if (is.null(ylab)) ylab <- "f(x)"
   if (is.null(main)) {
-    main <- paste0(lab, " (Marra-Wood ", round(100 * level), "% CI)")
+    main <- paste0(lab, " (", round(100 * level), "% CI)")
   }
-  if (is.null(ylim)) {
-    ylim <- range(pr$fit, pr$lwr, pr$upr, na.rm = TRUE)
-  }
-
+  if (is.null(ylim)) ylim <- range(pr$fit, pr$lwr, pr$upr, na.rm = TRUE)
   if (!isTRUE(add)) {
     graphics::plot(pr$x, pr$fit, type = "n", xlab = xlab, ylab = ylab,
                    main = main, ylim = ylim, ...)
     graphics::abline(h = 0, col = "grey70")
   }
   if (!is.null(pr$lwr) && !is.null(pr$upr)) {
-    graphics::polygon(
-      c(pr$x, rev(pr$x)),
-      c(pr$lwr, rev(pr$upr)),
-      col = shade, border = NA
-    )
+    graphics::polygon(c(pr$x, rev(pr$x)), c(pr$lwr, rev(pr$upr)),
+                      col = shade, border = NA)
   }
   graphics::lines(pr$x, pr$fit, col = col, lwd = 2, ...)
   invisible(pr)
 }
-

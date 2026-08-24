@@ -1,6 +1,6 @@
-// Beta-binomial mixed-effects model (BBmm) + optional additive P-splines.
-// logit(p) = X beta + Z u + B alpha
-// Subject RE blocks as before; smooths: alpha_j ~ GMRF(lambda_j S_j + kappa C_j)
+// Beta-binomial mixed-effects model (BBmm) + Eilers mixed P-splines.
+// logit(p) = X beta + Z u + Zs s
+// Subject RE as before; smooths: s ~ N(0, sigma_s[comp]^2 I) (Eilers 1999)
 #include <TMB.hpp>
 
 template <class Type>
@@ -64,19 +64,15 @@ Type objective_function<Type>::operator()() {
   DATA_IVECTOR(block_theta0);
 
   DATA_INTEGER(n_smooth);
-  DATA_MATRIX(B);
-  DATA_MATRIX(S);
-  DATA_MATRIX(C);
-  DATA_IVECTOR(smooth_K);
-  DATA_IVECTOR(smooth_off);
-  DATA_SCALAR(kappa);
+  DATA_MATRIX(Zs);
+  DATA_IVECTOR(s_comp);
 
   PARAMETER_VECTOR(beta);
   PARAMETER_VECTOR(log_phi);
   PARAMETER_VECTOR(theta_re);
   PARAMETER_VECTOR(u);
-  PARAMETER_VECTOR(log_lambda);
-  PARAMETER_VECTOR(alpha);
+  PARAMETER_VECTOR(log_sds);
+  PARAMETER_VECTOR(s);
 
   int n = y.size();
   Type nll = Type(0);
@@ -86,7 +82,7 @@ Type objective_function<Type>::operator()() {
 
   vector<Type> eta = X * beta + Z * u;
   if (n_smooth > 0) {
-    eta += B * alpha;
+    eta += Zs * s;
   }
 
   Type eps = Type(1e-8);
@@ -137,38 +133,15 @@ Type objective_function<Type>::operator()() {
     u_offset += G * q;
   }
 
-  // Additive P-splines
+  // Eilers P-spline random coefficients
   if (n_smooth > 0) {
-    using namespace density;
-    Type ridge = Type(1e-6);
-    for (int s = 0; s < n_smooth; s++) {
-      Type lam = exp(log_lambda(s));
-      int K = smooth_K(s);
-      int off = smooth_off(s);
-      matrix<Type> Q(K, K);
-      Q.setZero();
-      for (int i = 0; i < K; i++) {
-        for (int j = 0; j < K; j++) {
-          Q(i, j) = lam * S(off + i, off + j);
-        }
-        Q(i, i) += ridge;
-      }
-      vector<Type> as(K);
-      for (int i = 0; i < K; i++) as(i) = alpha(off + i);
-      nll += GMRF(asSparseMatrix(Q))(as);
-
-      Type sumf = Type(0);
-      for (int i = 0; i < n; i++) {
-        Type fi = Type(0);
-        for (int k = 0; k < K; k++) fi += B(i, off + k) * as(k);
-        sumf += fi;
-      }
-      nll += Type(0.5) * kappa * sumf * sumf;
+    vector<Type> sds = exp(log_sds);
+    for (int j = 0; j < s.size(); j++) {
+      int c = s_comp(j);
+      nll -= dnorm(s(j), Type(0), sds(c), true);
     }
-    vector<Type> lambda(n_smooth);
-    for (int s = 0; s < n_smooth; s++) lambda(s) = exp(log_lambda(s));
-    ADREPORT(lambda);
-    REPORT(alpha);
+    ADREPORT(sds);
+    REPORT(s);
   }
 
   ADREPORT(phi);

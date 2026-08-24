@@ -3,9 +3,10 @@
 #' Model
 #' \deqn{y_i \sim \mathrm{BB}(m_i, p_i, \phi),\quad
 #' \mathrm{logit}(p_i) = x_i^\top\beta + \sum_j f_j(x_{ij})}
-#' with optional additive P-splines \eqn{f_j = B_j\gamma_j} (Eilers–Marx
-#' difference penalty plus sum-to-zero via
-#' \eqn{\kappa(B_j^\top 1)(1^\top B_j)}).
+#' with optional additive P-splines via Eilers (1999) mixed reparameterisation
+#' \eqn{f_j = X_{\mathrm{null}}\beta_{\mathrm{null}} + Z_j s_j},
+#' \eqn{s_j \sim N(0,\sigma_{s_j}^2 I)}, \eqn{Z_j = B D'(DD')^{-1}}
+#' residualised against the fixed design.
 #'
 #' @param formula Model formula for the mean (logit link). Use
 #'   \code{s(x, ndx, pord)} for smooths.
@@ -15,8 +16,8 @@
 #'   `nlminb`. `"bayes"`: same point fit, then NUTS via
 #'   [tmbstan::tmbstan()] on a template with weak priors
 #'   (parametric models only; no `s()` yet).
-#' @param kappa Weight for soft sum-to-zero
-#'   \eqn{\tfrac12\kappa(\sum_i f_j(x_{ij}))^2} (default `1e6`).
+#' @param kappa Ignored (kept for API compatibility). Null-space of the
+#'   P-spline is in the fixed design.
 #' @param maxiter Maximum `nlminb` iterations.
 #' @param control Passed to [stats::nlminb()].
 #' @param silent Suppress TMB tracing.
@@ -48,7 +49,11 @@ BBreg <- function(formula, m, data = list(),
   X <- model.matrix(attr(mf, "terms"), data = mf)
   y <- as.numeric(model.response(mf))
   n <- length(y)
-  if (sm$n_smooth > 0L && nrow(sm$B) != n) {
+  X <- .merge_X_null(X, sm$X_null)
+  if (isTRUE(sm$n_smooth > 0L)) {
+    sm <- .reorth_smooth_Zs(sm, X)
+  }
+  if (sm$n_smooth > 0L && nrow(sm$Zs) != n) {
     stop("smooth design nrow does not match response length", call. = FALSE)
   }
 
@@ -70,10 +75,12 @@ BBreg <- function(formula, m, data = list(),
 
   ensure_tmb_dll("bb_reg")
 
-  # Starting values: binomial GLM on parametric part + moment phi
+  # Starting values: binomial GLM on parametric+null part + moment phi
   glm0 <- stats::glm.fit(X, y / m., family = stats::binomial(), weights = m.)
   beta0 <- as.numeric(glm0$coefficients)
   beta0[!is.finite(beta0)] <- 0
+  if (length(beta0) < ncol(X)) beta0 <- c(beta0, rep(0, ncol(X) - length(beta0)))
+  if (length(beta0) > ncol(X)) beta0 <- beta0[seq_len(ncol(X))]
   mu <- mean(y)
   v <- stats::var(y)
   mbar <- mean(m.)
@@ -90,10 +97,10 @@ BBreg <- function(formula, m, data = list(),
   )
   data_tmb <- c(
     list(y = y, m = m., X = X),
-    .tmb_smooth_data(sm, n = n, kappa = kappa)
+    .tmb_smooth_data(sm, n = n)
   )
 
-  random <- if (sm$n_smooth > 0L) "alpha" else NULL
+  random <- if (sm$n_smooth > 0L) "s" else NULL
   obj <- TMB::MakeADFun(
     data = data_tmb,
     parameters = parameters,
@@ -125,27 +132,33 @@ BBreg <- function(formula, m, data = list(),
   phi <- exp(log_phi)
 
   lambda <- numeric(0)
+  smooth_sd <- numeric(0)
   alpha <- numeric(0)
+  s_hat <- numeric(0)
   alpha.vcov <- NULL
+  s.vcov <- NULL
   fhat <- list()
   if (sm$n_smooth > 0L) {
-    lam_hat <- opt$par[grep("^log_lambda", names(opt$par))]
-    lambda <- setNames(exp(unname(lam_hat)), sm$labels)
-    alpha <- tryCatch(
+    sd_hat <- opt$par[grep("^log_sds", names(opt$par))]
+    smooth_sd <- setNames(exp(unname(sd_hat)), sm$labels)
+    lambda <- setNames(1 / (smooth_sd^2), sm$labels)
+    s_hat <- tryCatch(
       as.numeric(obj$env$last.par.best[obj$env$random]),
-      error = function(e) rep(NA_real_, sum(sm$smooth_K))
+      error = function(e) rep(NA_real_, ncol(sm$Zs))
     )
-    names(alpha) <- colnames(sm$B)
+    names(s_hat) <- colnames(sm$Zs)
+    alpha <- s_hat
     for (j in seq_len(sm$n_smooth)) {
       idx <- sm$blocks_idx[[j]]
-      fhat[[j]] <- as.numeric(sm$specs[[j]]$B %*% alpha[idx])
+      fhat[[j]] <- as.numeric(sm$Zs[, idx, drop = FALSE] %*% s_hat[idx])
     }
     names(fhat) <- sm$labels
-    alpha.vcov <- .alpha_vcov_from_joint(
+    s.vcov <- .alpha_vcov_from_joint(
       if (!is.null(sdr)) sdr$jointPrecision else NULL,
-      n_alpha = length(alpha),
+      n_alpha = length(s_hat),
       n_u = 0L
     )
+    alpha.vcov <- s.vcov
   }
 
   if (!is.null(sdr)) {
@@ -168,7 +181,7 @@ BBreg <- function(formula, m, data = list(),
   }
 
   eta <- as.numeric(X %*% beta)
-  if (sm$n_smooth > 0L) eta <- eta + as.numeric(sm$B %*% alpha)
+  if (sm$n_smooth > 0L) eta <- eta + as.numeric(sm$Zs %*% s_hat)
   fitted.values <- 1 / (1 + exp(-eta))
 
   e <- sum(y) / sum(m.)
@@ -217,8 +230,11 @@ BBreg <- function(formula, m, data = list(),
     sdreport = sdr,
     nll = opt$objective,
     smooth = if (sm$n_smooth > 0L) sm else NULL,
+    s = if (length(s_hat)) s_hat else NULL,
+    s.vcov = s.vcov,
     alpha = if (length(alpha)) alpha else NULL,
     alpha.vcov = alpha.vcov,
+    smooth_sd = if (length(smooth_sd)) smooth_sd else NULL,
     lambda = if (length(lambda)) lambda else NULL,
     fhat = if (length(fhat)) fhat else NULL,
     kappa = kappa,
@@ -319,14 +335,16 @@ print.BBreg <- function(x, ...) {
   if (!is.null(x$log_phi)) {
     cat("log(phi):", as.numeric(x$log_phi)[1L], "\n")
   }
-  if (!is.null(x$lambda)) {
+  if (!is.null(x$smooth_sd)) {
+    cat("\nsmooth_sd (Eilers P-spline RE SD):\n")
+    print(x$smooth_sd)
+    if (!is.null(x$lambda)) {
+      cat("lambda (= 1/smooth_sd^2):\n")
+      print(x$lambda)
+    }
+  } else if (!is.null(x$lambda)) {
     cat("\nlambda (P-spline smoothing):\n")
     print(x$lambda)
-    if (!is.null(x$fhat)) {
-      for (nm in names(x$fhat)) {
-        cat(sprintf("  sum(%s) = %.3e  (sum-to-zero check)\n", nm, sum(x$fhat[[nm]])))
-      }
-    }
   }
   cat("\nDeviance:", x$deviance, " on ", x$df, " degrees of freedom\n")
   cat("Null deviance:", x$null.deviance, "on", x$null.df, " degrees of freedom\n")

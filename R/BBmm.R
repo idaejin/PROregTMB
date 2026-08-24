@@ -10,9 +10,12 @@
 #'
 #' **Random effects**
 #' \itemize{
-#'   \item \code{random = ~ (1 | id)} — random intercept
+#'   \item \code{random = ~ (1 | id)} — shared random intercept (M1)
 #'   \item \code{random = ~ (1 + time | id)} — RI + RS;
 #'     \code{corr = "unstructured"} (default if \(q>1\)) or \code{"diag"}
+#'   \item \code{random = ~ (0 + dim | id)} — domain-specific RE (long +
+#'     \code{dim=}): M3 if \code{corr = "unstructured"}, M2 if
+#'     \code{corr = "diag"}
 #'   \item Legacy: \code{random.formula = ~ id}
 #'   \item Advanced: \code{Z} + \code{nRandComp}
 #' }
@@ -22,11 +25,14 @@
 #'   \item Wide (CS): \code{cbind(y1,y2,y3) ~ x} with \code{random = ~ (1|id)}
 #'   \item Long (CS or longitudinal): \code{y ~ x + time} with
 #'     \code{dim = "domain"} (column naming the dimension \(\ell\))
+#'   \item Additive P-splines: shared \code{s(x)} across dimensions, or
+#'     domain-specific \code{s(x, by = domain)} with \code{dim=} (long)
 #' }
 #' Low-level stacking: [multi_bb_stack()].
 #'
 #' @param fixed.formula Fixed-effects formula. Multivariate wide form:
-#'   \code{cbind(y1,y2) ~ x}.
+#'   \code{cbind(y1,y2) ~ x + s(z)}. Supports \code{s()} (shared across
+#'   dimensions).
 #' @param X Fixed-effects design matrix (alternative to `fixed.formula`).
 #' @param y Response vector (required if `X` is supplied).
 #' @param random Random-effects formula with `|` bars, or a named list.
@@ -41,12 +47,16 @@
 #' @param m Maximum score (scalar, vector, length-\(L\), or column name).
 #' @param data Data frame.
 #' @param method `"mle"` (default) or `"bayes"`.
-#' @param kappa Weight for sum-to-zero centering of each `s()` (default `1e8`).
+#' @param kappa Ignored (kept for API compatibility). Null-space of the
+#'   P-spline is in the fixed design (Eilers mixed reparameterisation).
 #' @param maxiter Maximum `nlminb` iterations.
 #' @param show Logical; print progress.
 #' @param nDim Number of dimensions (usually auto-set from `cbind` / `dim`).
 #' @param silent Suppress TMB tracing.
 #' @param control Extra [stats::nlminb()] control.
+#' @param start Optional named numeric vector of outer parameters (as in
+#'   `opt$par`) used to warm-start optimisation; useful for polishing a
+#'   previous fit to a smaller gradient.
 #' @param chains,iter,warmup,seed Stan controls when `method = "bayes"`.
 #' @param laplace_bayes If `TRUE`, tmbstan uses Laplace for `u`.
 #' @return Object of class `BBmm`.
@@ -61,6 +71,7 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
                  kappa = 1e6,
                  maxiter = 100, show = FALSE, nDim = 1L,
                  silent = TRUE, control = list(),
+                 start = NULL,
                  chains = 2L, iter = 1000L, warmup = 400L, seed = 1L,
                  laplace_bayes = TRUE) {
   method <- match.arg(method)
@@ -75,12 +86,6 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
   # ----- Multivariate clean API (cbind / dim=) -----
   if (!missing(fixed.formula) &&
       ( !is.null(dim) || .is_cbind_response(fixed.formula) )) {
-    if (length(grep("^s\\s*\\(",
-                    attr(stats::terms(fixed.formula, specials = "s"),
-                         "term.labels"))) ) {
-      stop("s() smooths are not yet supported with cbind()/dim= multivariate API",
-           call. = FALSE)
-    }
     if (is.null(data) || !(is.data.frame(data) || is.list(data))) {
       stop("multivariate BBmm requires data = ...", call. = FALSE)
     }
@@ -88,9 +93,10 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
       stop("Do not pass Z/nRandComp with cbind()/dim=; use random=",
            call. = FALSE)
     }
+    data_user <- as.data.frame(data)
     multi <- .prepare_multivariate_bbmm(
       fixed.formula = fixed.formula,
-      data = data,
+      data = data_user,
       m = m,
       dim = dim,
       random = random,
@@ -106,6 +112,32 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
     formula_out <- multi$formula_out
     balanced <- if (length(unique(m.)) == 1L) "yes" else "no"
     nObs <- length(y)
+
+    # Shared or by= domain smooths (Eilers mixed) on stacked design
+    if (identical(multi$mode, "wide")) {
+      sm <- .build_smooth_design(fixed.formula, data = data_user)
+      if (isTRUE(sm$n_smooth > 0L)) {
+        has_by <- any(vapply(sm$specs, function(z) {
+          !is.null(z$by_level) && !is.na(z$by_level)
+        }, logical(1)))
+        if (has_by) {
+          stop(
+            "s(..., by = ) requires long multivariate data with dim = \"...\"; ",
+            "cbind() wide form only supports shared s() (no by).",
+            call. = FALSE
+          )
+        }
+        sm <- .rep_smooth_rows(sm, L = nDim)
+      }
+    } else {
+      sm <- .build_smooth_design(fixed.formula, data = data)
+    }
+    X <- .merge_X_null(X, sm$X_null)
+    if (isTRUE(sm$n_smooth > 0L)) sm <- .reorth_smooth_Zs(sm, X)
+    if (isTRUE(sm$n_smooth > 0L) && nrow(sm$Zs) != nObs) {
+      stop("smooth design nrow does not match stacked response length",
+           call. = FALSE)
+    }
   } else {
     # ----- Univariate / manual X,y -----
     if (!missing(fixed.formula)) {
@@ -120,6 +152,8 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
       sm <- .build_smooth_design(fixed.formula, data = data)
       mf <- model.frame(formula = sm$fixed, data = data)
       X <- model.matrix(attr(mf, "terms"), data = mf)
+      X <- .merge_X_null(X, sm$X_null)
+      if (isTRUE(sm$n_smooth > 0L)) sm <- .reorth_smooth_Zs(sm, X)
       y <- as.numeric(model.response(mf))
       formula_out <- fixed.formula
     } else {
@@ -207,9 +241,9 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
   ensure_tmb_dll("bb_mm")
 
   # ----- Starting values -----
-  if (!is.null(formula_out) && nDim == 1L) {
+  if (!is.null(formula_out) && nDim == 1L && !isTRUE(sm$n_smooth > 0L)) {
     bb0 <- tryCatch(
-      BBreg(formula_out, m = m., data = data, kappa = kappa, silent = TRUE),
+      BBreg(formula_out, m = m., data = data, silent = TRUE),
       error = function(e) NULL
     )
   } else {
@@ -228,6 +262,10 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
     if (!is.null(glm0)) {
       beta0 <- as.numeric(glm0$coefficients)
       beta0[!is.finite(beta0)] <- 0
+      if (length(beta0) < ncol(X)) {
+        beta0 <- c(beta0, rep(0, ncol(X) - length(beta0)))
+      }
+      if (length(beta0) > ncol(X)) beta0 <- beta0[seq_len(ncol(X))]
     } else {
       beta0 <- rep(0, ncol(X))
       beta0[1] <- stats::qlogis(mean(y / m.))
@@ -260,10 +298,10 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
       block_corr = as.integer(re$block_corr),
       block_theta0 = as.integer(re$block_theta0)
     ),
-    .tmb_smooth_data(sm, n = nObs, kappa = kappa)
+    .tmb_smooth_data(sm, n = nObs)
   )
 
-  random_tmb <- if (isTRUE(sm$n_smooth > 0L)) c("u", "alpha") else "u"
+  random_tmb <- if (isTRUE(sm$n_smooth > 0L)) c("u", "s") else "u"
   obj <- TMB::MakeADFun(
     data = data_tmb,
     parameters = parameters,
@@ -275,6 +313,25 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
   ctrl <- modifyList(list(iter.max = maxiter, eval.max = maxiter * 2L), control)
   if (show) cat("Optimizing Laplace approximate marginal likelihood...\n")
 
+  # Optional warm start of outer parameters (beta, log_phi, theta_re, ...)
+  if (!is.null(start)) {
+    start <- as.numeric(start)
+    if (length(start) != length(obj$par)) {
+      stop("length(start) must equal length(obj$par) (= ",
+           length(obj$par), "); got ", length(start), call. = FALSE)
+    }
+    nms <- names(obj$par)
+    # Prefer positional copy: saved fits may carry duplicated/generic names
+    # (e.g. all "beta"), which would break name-based alignment.
+    if (!is.null(names(start)) && !is.null(nms) &&
+        length(unique(names(start))) == length(start) &&
+        all(nms %in% names(start))) {
+      start <- unname(start[nms])
+    }
+    obj$par <- start
+    names(obj$par) <- nms
+  }
+
   opt <- tryCatch(
     stats::nlminb(obj$par, obj$fn, obj$gr, control = ctrl),
     error = function(e) e
@@ -283,7 +340,138 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
     return(list(conv = "no", message = conditionMessage(opt)))
   }
 
-  conv <- if (opt$convergence == 0) "yes" else "no"
+  max_abs_grad <- function(par) {
+    g <- tryCatch(obj$gr(par), error = function(e) NA_real_)
+    if (!length(g) || anyNA(g)) return(Inf)
+    max(abs(g))
+  }
+
+  # BFGS polish for multi-dim RE / smooths: accept if nll improves OR gradient
+  # shrinks without worsening nll (flat likelihood near mode).
+  need_polish <- isTRUE(sm$n_smooth > 0L) ||
+    any(vapply(re$blocks, function(b) isTRUE(b$q > 1L), logical(1)))
+  if (need_polish) {
+    g0 <- max_abs_grad(opt$par)
+    opt2 <- tryCatch(
+      stats::optim(
+        opt$par, obj$fn, obj$gr, method = "BFGS",
+        control = list(
+          maxit = max(400L, as.integer(maxiter)),
+          reltol = 1e-12
+        )
+      ),
+      error = function(e) NULL
+    )
+    if (!is.null(opt2) && is.finite(opt2$value)) {
+      g2 <- max_abs_grad(opt2$par)
+      better_nll <- isTRUE(opt2$value < opt$objective - 1e-10)
+      better_grad <- isTRUE(g2 < g0 * 0.99) &&
+        isTRUE(opt2$value <= opt$objective + 1e-6)
+      if (better_nll || better_grad) {
+        opt$par <- opt2$par
+        opt$objective <- opt2$value
+        opt$convergence <- opt2$convergence
+        opt$message <- if (opt2$convergence == 0) {
+          if (better_nll && better_grad) "BFGS polish OK (nll+grad)"
+          else if (better_grad) "BFGS polish OK (grad)"
+          else "BFGS polish OK"
+        } else {
+          paste0("BFGS code ", opt2$convergence)
+        }
+        opt$iterations <- opt$iterations + as.integer(opt2$counts[["function"]])
+      }
+    }
+    # Second nlminb pass from polished point with tighter tolerances
+    ctrl2 <- modifyList(
+      ctrl,
+      list(
+        iter.max = max(200L, as.integer(maxiter)),
+        eval.max = max(400L, as.integer(maxiter) * 2L),
+        abs.tol = 0,
+        rel.tol = 1e-12,
+        x.tol = 1e-10,
+        xf.tol = 1e-12
+      )
+    )
+    opt3 <- tryCatch(
+      stats::nlminb(opt$par, obj$fn, obj$gr, control = ctrl2),
+      error = function(e) NULL
+    )
+    if (!is.null(opt3) && is.finite(opt3$objective)) {
+      g3 <- max_abs_grad(opt3$par)
+      g_cur <- max_abs_grad(opt$par)
+      if (isTRUE(opt3$objective <= opt$objective + 1e-8) &&
+          isTRUE(g3 <= g_cur + 1e-12)) {
+        opt$par <- opt3$par
+        opt$objective <- opt3$objective
+        opt$convergence <- opt3$convergence
+        opt$message <- paste0(
+          if (nzchar(opt$message)) paste0(opt$message, "; ") else "",
+          "nlminb tight (", opt3$message, ")"
+        )
+        opt$iterations <- opt$iterations + as.integer(opt3$iterations)
+      }
+    }
+  }
+  # Sync ADFun at the reported mode before sdreport
+  invisible(obj$fn(opt$par))
+  opt$max_grad <- max_abs_grad(opt$par)
+
+  # Newton polish when residual outer gradient remains large but the Laplace
+  # surface is flat (common with poorly scaled within slopes). Repeated damped
+  # Newton steps with a dense outer Hessian typically drive max|g| below 1e-3
+  # with negligible change in nll / beta.
+  if (isTRUE(opt$max_grad > 1e-3) && need_polish) {
+    for (newt_it in seq_len(5L)) {
+      if (!isTRUE(opt$max_grad > 1e-3)) break
+      H <- tryCatch(stats::optimHess(opt$par, obj$fn, obj$gr),
+                    error = function(e) NULL)
+      if (is.null(H) || !all(is.finite(H))) break
+      gN <- tryCatch(as.numeric(obj$gr(opt$par)), error = function(e) NULL)
+      if (is.null(gN) || !all(is.finite(gN))) break
+      delta <- tryCatch(as.numeric(solve(H, -gN)), error = function(e) NULL)
+      if (is.null(delta)) {
+        delta <- tryCatch(as.numeric(qr.solve(H, -gN, tol = 1e-12)),
+                          error = function(e) NULL)
+      }
+      if (is.null(delta) || !all(is.finite(delta))) break
+      nll0 <- as.numeric(obj$fn(opt$par))
+      g0 <- max_abs_grad(opt$par)
+      best_a <- 0
+      best_nll <- nll0
+      best_g <- g0
+      for (a in c(1, 0.5, 0.25, 0.1, 0.01)) {
+        p1 <- opt$par + a * delta
+        n1 <- tryCatch(obj$fn(p1), error = function(e) Inf)
+        if (!is.finite(n1) || n1 > nll0 + 1e-4) next
+        invisible(obj$fn(p1))
+        g1 <- max_abs_grad(p1)
+        # Accept if gradient shrinks (allow tiny nll increase on Laplace plateau)
+        if (isTRUE(g1 < best_g * 0.999)) {
+          best_a <- a
+          best_nll <- n1
+          best_g <- g1
+        }
+      }
+      if (best_a <= 0) break
+      opt$par <- opt$par + best_a * delta
+      opt$objective <- as.numeric(obj$fn(opt$par))
+      opt$max_grad <- max_abs_grad(opt$par)
+      opt$message <- paste0(
+        if (nzchar(opt$message)) paste0(opt$message, "; ") else "",
+        sprintf("Newton[%d] a=%.3g max|g|=%.3g", newt_it, best_a, opt$max_grad)
+      )
+    }
+  }
+
+  # nlminb often exits nonzero ("singular convergence") on a flat Laplace
+  # surface even when outer max|g| is tiny; trust the gradient then.
+  conv <- if (isTRUE(opt$convergence == 0) ||
+               (is.finite(opt$max_grad) && opt$max_grad < 1e-3)) {
+    "yes"
+  } else {
+    "no"
+  }
   sdr <- tryCatch(
     TMB::sdreport(obj, getJointPrecision = isTRUE(sm$n_smooth > 0L)),
     error = function(e) NULL
@@ -325,34 +513,37 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
   names(sd_all) <- sd_names
   all.sigma <- sd_all
 
-  # Random effects: subject u and optional smooth alpha
+  # Random effects: subject u and optional smooth s
   rand_hat <- tryCatch(as.numeric(obj$env$last.par.best[obj$env$random]),
                        error = function(e) rep(NA_real_, nRand))
-  rand_names <- names(obj$env$last.par.best[obj$env$random])
-  if (is.null(rand_names)) rand_names <- rep("u", length(rand_hat))
-  # TMB often names all "u" / "alpha" without index; split by length
   u_hat <- rand_hat[seq_len(nRand)]
   names(u_hat) <- colnames(Z)
   alpha <- NULL
+  s_hat <- NULL
   alpha.vcov <- NULL
+  s.vcov <- NULL
   lambda <- NULL
+  smooth_sd <- NULL
   fhat <- NULL
   if (isTRUE(sm$n_smooth > 0L)) {
-    n_alpha <- sum(sm$smooth_K)
-    alpha <- rand_hat[nRand + seq_len(n_alpha)]
-    names(alpha) <- colnames(sm$B)
-    lam_hat <- par_fixed[grep("^log_lambda", nm)]
-    lambda <- setNames(exp(unname(lam_hat)), sm$labels)
+    n_s <- ncol(sm$Zs)
+    s_hat <- rand_hat[nRand + seq_len(n_s)]
+    names(s_hat) <- colnames(sm$Zs)
+    alpha <- s_hat
+    sd_hat <- par_fixed[grep("^log_sds", nm)]
+    smooth_sd <- setNames(exp(unname(sd_hat)), sm$labels)
+    lambda <- setNames(1 / (smooth_sd^2), sm$labels)
     fhat <- lapply(seq_len(sm$n_smooth), function(j) {
       idx <- sm$blocks_idx[[j]]
-      as.numeric(sm$specs[[j]]$B %*% alpha[idx])
+      as.numeric(sm$Zs[, idx, drop = FALSE] %*% s_hat[idx])
     })
     names(fhat) <- sm$labels
-    alpha.vcov <- .alpha_vcov_from_joint(
+    s.vcov <- .alpha_vcov_from_joint(
       if (!is.null(sdr)) sdr$jointPrecision else NULL,
-      n_alpha = n_alpha,
+      n_alpha = n_s,
       n_u = nRand
     )
+    alpha.vcov <- s.vcov
   }
 
   fixed.vcov <- matrix(NA_real_, length(beta), length(beta),
@@ -373,7 +564,7 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
   }
 
   eta <- as.numeric(X %*% beta + as.numeric(Z %*% u_hat))
-  if (isTRUE(sm$n_smooth > 0L)) eta <- eta + as.numeric(sm$B %*% alpha)
+  if (isTRUE(sm$n_smooth > 0L)) eta <- eta + as.numeric(sm$Zs %*% s_hat)
   fitted <- 1 / (1 + exp(-eta))
 
   loglik_bb <- function(p_hat, phi_hat, y_, m_) {
@@ -458,8 +649,11 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
     dim_names = if (!is.null(multi)) multi$dim_names else NULL,
     random = random,
     smooth = if (isTRUE(sm$n_smooth > 0L)) sm else NULL,
+    s = s_hat,
+    s.vcov = s.vcov,
     alpha = alpha,
     alpha.vcov = alpha.vcov,
+    smooth_sd = smooth_sd,
     lambda = lambda,
     fhat = fhat,
     kappa = kappa,
@@ -467,6 +661,7 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
     obj = obj,
     sdreport = sdr,
     nll = opt$objective,
+    max_grad = if (!is.null(opt$max_grad)) opt$max_grad else NA_real_,
     posterior = NULL,
     stanfit = NULL,
     time_bayes = NA_real_
@@ -498,9 +693,11 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
     stop('method = "bayes" requires packages tmbstan and rstan', call. = FALSE)
   }
   # bb_mm_prior is parametric + subject RE only
-  drop <- c("n_smooth", "B", "S", "C", "smooth_K", "smooth_off", "kappa")
+  drop <- c("n_smooth", "Zs", "s_comp", "B", "S", "C", "smooth_K",
+            "smooth_off", "kappa")
   data_tmb <- data_tmb[setdiff(names(data_tmb), drop)]
-  parameters <- parameters[setdiff(names(parameters), c("log_lambda", "alpha"))]
+  parameters <- parameters[setdiff(names(parameters),
+                                   c("log_sds", "s", "log_lambda", "alpha"))]
   ensure_tmb_dll("bb_mm_prior")
   beta0 <- as.numeric(fit$fixed.coef)
   phi0 <- as.numeric(fit$phi.coef)
@@ -599,6 +796,10 @@ print.BBmm <- function(x, ...) {
     }
   }
   cat("\nphi (BB dispersion):", paste(x$phi, collapse = ", "), "\n")
+  if (!is.null(x$smooth_sd)) {
+    cat("\nsmooth_sd (Eilers P-spline RE SD):\n")
+    print(x$smooth_sd)
+  }
   if (identical(x$method, "bayes") && !is.null(x$posterior)) {
     cat("\nPosterior summary (tmbstan):\n")
     print(x$posterior, row.names = FALSE, digits = 4)

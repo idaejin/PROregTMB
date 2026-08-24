@@ -1,6 +1,6 @@
 Package: PROregTMB
 Title: Patient Reported Outcomes Regression with TMB
-Version: 0.0.2
+Version: 0.0.3
 Authors@R: c(
     person("Dae-Jin", "Lee", role = c("aut", "cre"),
            email = "dlee@bcamath.org"),

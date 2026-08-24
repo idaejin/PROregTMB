@@ -74,9 +74,24 @@ ensure_tmb_dll <- function(name, force = FALSE, quiet = FALSE) {
   }
   .tmb_env[[name]] <- NULL
 
-  work <- file.path(tempdir(), "PROregTMB_tmb")
+  work <- file.path(
+    Sys.getenv("PROREGTMB_TMB_CACHE", unset = path.expand("~/.cache/PROregTMB_tmb")),
+    name
+  )
   dir.create(work, showWarnings = FALSE, recursive = TRUE)
-  file.copy(cpp, file.path(work, basename(cpp)), overwrite = TRUE)
+  so <- file.path(work, paste0(name, .Platform$dynlib.ext))
+  cpp_dst <- file.path(work, basename(cpp))
+  # Reuse existing DLL if cpp unchanged and .so present
+  need_compile <- isTRUE(force) || !file.exists(so) ||
+    !file.exists(cpp_dst) ||
+    isTRUE(file.info(cpp)$mtime > file.info(so)$mtime)
+  if (!need_compile && (name %in% loaded || file.exists(so))) {
+    if (!(name %in% loaded)) dyn.load(so)
+    .tmb_env[[name]] <- TRUE
+    .tmb_env[[paste0(name, "_mtime")]] <- mtime
+    return(invisible(name))
+  }
+  file.copy(cpp, cpp_dst, overwrite = TRUE)
 
   show_msg <- !isTRUE(quiet) &&
     !isFALSE(getOption("PROregTMB.verbose_compile", TRUE))

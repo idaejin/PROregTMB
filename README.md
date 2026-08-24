@@ -12,7 +12,7 @@ Reimplementation of [PROreg](https://cran.r-project.org/package=PROreg) beta-bin
 | `BBmm` (mixed effects + Laplace) | done (TMB) |
 | Multidimensional `BBmm` (shared latent) | done (`cbind` / `dim=`) |
 | `BBjm` one-stage joint (BB + Weibull) | done (TMB) |
-| Additive P-splines `s(x, ndx, pord)` | done (`BBreg` / `BBmm`) |
+| Additive P-splines `s(x, ndx, pord)` | done (`BBreg` / `BBmm`; `by=` multi) |
 | Rcpp `rBB` / `ldBB` + sparse `Z` / smooth SE | done |
 
 ## Install
@@ -112,28 +112,60 @@ BBmm(
 )
 ```
 
+**M3** (domain-specific correlated RE, BB-GAM primary):
+
+```r
+BBmm(
+  y ~ hclus4 + s(wt, by = dim, k = 8),
+  random = ~ (0 + dim | id),
+  dim = "dim",
+  corr = "unstructured",
+  m = "m",
+  data = long
+)
+# M2: same with corr = "diag"; M1: random = ~ (1 | id)
+```
+
 Advanced manual stacking remains available via `multi_bb_stack()` (not the preferred interface).
 
-### Additive P-splines (Eilers–Marx + sum-to-zero)
+Shared additive P-splines across dimensions (`s()` same for every \(\ell\)),
+or **domain-specific** smooths with `by=` on long data:
+
+```r
+BBmm(
+  cbind(y1, y2) ~ s(x, ndx = 10),
+  random = ~ (1 | id),
+  m = c(20, 10),
+  data = dat
+)
+# long, by domain + M3 (COPD-style):
+# BBmm(y ~ hclus4 + wt + fev1p + s(wt, by = dim, k = 8) + s(fev1p, by = dim, k = 8),
+#      random = ~ (0 + dim | id), dim = "dim", corr = "unstructured",
+#      m = "m", data = long)
+```
+
+COPD example script: `scripts/fit_COPD_multi_pspline.R`.
+
+### Additive P-splines (Eilers 1999 mixed)
 
 On the logit scale:
 
 \[
 \operatorname{logit}(p)=X\beta+\sum_j f_j(x_j),\quad
-f_j=B_j\gamma_j,
+f_j=X_{\mathrm{null},j}\beta_{\mathrm{null},j}+Z_j s_j,\quad
+s_j\sim N(0,\sigma_{s_j}^2 I),
 \]
 
-with penalty \(\lambda_j\|D_{\mathrm{pord}}\gamma_j\|^2\) plus the centering
-term \(\kappa\|1^\top B_j\gamma_j\|^2\) (so \(\sum_i \hat f_j(x_{ij})\approx 0\)),
-as in the additive P-spline notes. Notation follows Eilers: `ndx`, `pord`, `bdeg`.
+with \(Z_j=B D'(DD')^{-1}\) residualised against \(X\) (null space in the
+fixed design). Notation follows Eilers: `ndx`, `pord`, `bdeg`.
 
 ```r
 fit_add <- BBreg(
   y ~ z + s(age, ndx = 12, pord = 2) + s(bmi, ndx = 10),
   m = m, data = dat
 )
-fit_add$lambda
-sum(fit_add$fhat[["s(age)"]])   # ~ 0
+fit_add$smooth_sd
+fit_add$lambda                 # = 1 / smooth_sd^2
 predict_smooth(fit_add, which = 1)   # Marra-Wood (2012) se/lwr/upr
 plot_smooth(fit_add)                 # shaded Marra-Wood bands
 
@@ -184,7 +216,7 @@ browseVignettes("PROregTMB")
 | Vignette | Content |
 |----------|---------|
 | Getting started | `dBB` / `rBB`, `BBest`, `BBreg` |
-| Mixed and multivariate | RI, RI+RS, `cbind` / `dim=` |
+| Mixed and multivariate | RI, RI+RS, `cbind` / `dim=`, shared `s()` |
 | Additive P-splines | `s(x, ndx, pord)`, Marra–Wood bands, `plot_smooth` |
 | Benchmarks and joint-model results | Precomputed pilots (PROreg, TSBB, `BBjm`) |
 

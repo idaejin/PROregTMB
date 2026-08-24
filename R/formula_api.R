@@ -8,7 +8,8 @@
     c(
       "Y_i ~ BB(m_i, p_i, phi)",
       "logit(p_i) = x_i' beta + sum_j f_j(x_ij)",
-      "f_j = B_j gamma_j; pen = lambda_j ||D gamma_j||^2 + kappa ||1'B_j gamma_j||^2"
+      "f_j = X_null beta_null + Z_j s_j;  s_j ~ N(0, sigma_sj^2 I)",
+      "Z_j = B D'(DD')^{-1} (Eilers mixed; residualised vs X)"
     )
   } else {
     c(

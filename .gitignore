@@ -10,6 +10,15 @@ inst/TMB/*.so
 *.tar.gz
 .DS_Store
 scripts/bench_out/*.log
+scripts/bench_out/*.rds
+scripts/out_*/
+scripts/tmb/
 vignettes/*.html
 vignettes/*_files/
 vignettes/*.R
+
+# Local tooling / regenerable caches
+.cursor/
+.ignore
+graphify-out/
+graft/

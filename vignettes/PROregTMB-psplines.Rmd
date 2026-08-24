@@ -21,23 +21,24 @@ knitr::opts_chunk$set(
 
 # Model
 
-Additive BB regression on the logit scale:
+Additive BB regression on the logit scale with Eilers (1999) mixed
+reparameterisation (same engine as BB-GAM / Report 4):
 
 \[
 \operatorname{logit}(p_i)
 = x_i^\top\beta + \sum_{j=1}^{J} f_j(x_{ij}),\qquad
-f_j = B_j\gamma_j,
+f_j = X_{\mathrm{null},j}\beta_{\mathrm{null},j} + Z_j s_j,
+\quad s_j \sim N(0,\sigma_{s_j}^2 I).
 \]
 
-with Eilers–Marx P-splines. For each smooth:
+For each smooth, \(Z_j = B D'(DD')^{-1}\) from the Eilers–Marx B-spline
+basis and difference penalty of order `pord`, residualised against the
+fixed design so the polynomial null space lives in \(X\) (not in a
+penalised GMRF with \(\kappa\)).
 
-- difference penalty \(\lambda_j\|D_{\mathrm{pord}}\gamma_j\|^2\);
-- sum-to-zero identifiability
-  \(\tfrac12\kappa\bigl(\sum_i f_j(x_{ij})\bigr)^2\)
-  (same idea as absorbing \(\kappa B_j^\top 11^\top B_j\) into the penalty).
-
-Spline coefficients \(\gamma_j\) are integrated out by Laplace approximation;
-smoothing parameters \(\lambda_j\) are estimated jointly (REML-like).
+Wiggly coefficients \(s_j\) are integrated out by Laplace approximation;
+smooth SDs \(\sigma_{s_j}\) are estimated jointly (`smooth_sd` on the fit;
+`lambda = 1/smooth_sd^2` is kept as an alias).
 
 Notation follows Eilers: `ndx` (intervals), `pord` (difference order),
 `bdeg` (B-spline degree).
@@ -56,7 +57,7 @@ BBmm(y ~ s(time, ndx = 10), random = ~ (1 | id),
      m = m, data = dat)
 ```
 
-Defaults: `ndx = 10`, `pord = 2`, `bdeg = 3`, `kappa = 1e6`.
+Defaults: `ndx = 10`, `pord = 2`, `bdeg = 3`.
 
 # Cross-sectional additive example
 
@@ -91,7 +92,7 @@ cor(fit$fhat[["s(x1)"]], f1_true - mean(f1_true))
 cor(fit$fhat[["s(x2)"]], f2_true - mean(f2_true))
 ```
 
-```{r plot-add, fig.cap="Marra-Wood (2012) 95% pointwise Bayesian bands vs centered truth (dashed)."}
+```{r plot-add, fig.cap="Estimated smooths with 95% pointwise bands vs centered truth (dashed)."}
 truths <- list(f1_true - mean(f1_true), f2_true - mean(f2_true))
 xs <- list(x1, x2)
 labs <- names(fit$fhat)
@@ -103,7 +104,7 @@ for (j in 1:2) {
   ylim <- range(pr$lwr, pr$upr, truths[[j]], finite = TRUE)
   plot(NA, xlim = range(g), ylim = ylim,
        xlab = paste0("x", j), ylab = paste0("f", j),
-       main = paste0(labs[j], " (Marra-Wood)"))
+       main = labs[j])
   polygon(c(pr$x, rev(pr$x)), c(pr$lwr, rev(pr$upr)),
           col = adjustcolor("darkorange2", 0.30), border = NA)
   lines(xs[[j]][o], truths[[j]][o], lty = 2, lwd = 1.5)
@@ -115,10 +116,10 @@ par(op)
 # Helper: plot_smooth(fit)  # same bands
 ```
 
-Bands follow **Marra & Wood (2012)**: Bayesian / Wahba–Silverman covariance of
-the P-spline coefficients from the Laplace posterior
-(\eqn{\hat f\pm z\sqrt{b^\top V_\gamma b}}), with good across-the-function
-coverage properties. For `BBmm`, \(V_\gamma\) is the **marginal** covariance
+Pointwise bands use the Bayesian / Wahba–Silverman covariance of the
+P-spline coefficients from the Laplace posterior
+(\eqn{\hat f\pm z\sqrt{b^\top V_\gamma b}}), following Marra & Wood (2012;
+see References). For `BBmm`, \(V_\gamma\) is the **marginal** covariance
 of the spline block after integrating subject random effects.
 
 # Mixed model with a smooth (`BBmm`)
@@ -146,19 +147,19 @@ fit_mm$sigma
 sum(fit_mm$fhat[[1]])
 ```
 
-```{r plot-mm, fig.cap="BBmm smooth with Marra-Wood (2012) 95% pointwise band."}
+```{r plot-mm, fig.cap="BBmm smooth with 95% pointwise band vs centered truth (dashed)."}
 g <- seq(0, 1, length.out = 100)
 pr <- predict_smooth(fit_mm, which = 1, x = g, method = "marrawood")
 ylim <- range(pr$lwr, pr$upr, sin(2 * pi * g) - mean(sin(2 * pi * x)),
               finite = TRUE)
 plot(NA, xlim = range(g), ylim = ylim,
-     xlab = "x", ylab = "f(x)", main = "BBmm + s(x) (Marra-Wood)")
+     xlab = "x", ylab = "f(x)", main = "BBmm + s(x)")
 polygon(c(pr$x, rev(pr$x)), c(pr$lwr, rev(pr$upr)),
         col = adjustcolor("darkorange2", 0.30), border = NA)
 lines(g, sin(2 * pi * g) - mean(sin(2 * pi * x)), lty = 2)
 lines(pr$x, pr$fit, col = "darkorange2", lwd = 2)
 abline(h = 0, col = "grey70")
-legend("topright", c("true (centered)", "estimate", "Marra-Wood 95%"),
+legend("topright", c("true (centered)", "estimate", "95% band"),
        lty = c(2, 1, NA), lwd = c(1, 2, NA),
        fill = c(NA, NA, adjustcolor("darkorange2", 0.30)),
        border = c(NA, NA, NA),
@@ -170,12 +171,24 @@ legend("topright", c("true (centered)", "estimate", "Marra-Wood 95%"),
 | Object / function | Role |
 |-------------------|------|
 | `s(x, ndx, pord, bdeg)` | Smooth term in a formula |
-| `bbase()` / `penalty_diff()` / `penalty_center()` | Basis and penalties |
-| `fit$lambda` | Estimated smoothing parameters |
+| `bbase()` / `penalty_diff()` | Basis helpers (public) |
+| `fit$smooth_sd` | Estimated smooth RE SDs \(\sigma_s\) |
+| `fit$lambda` | Alias \(1/\sigma_s^2\) |
 | `fit$fhat` | Fitted smooths at observed design |
-| `fit$alpha` | Spline coefficients |
-| `predict_smooth(..., method="marrawood")` | Marra–Wood (2012) pointwise bands |
-| `plot_smooth()` | Plot estimate + Marra–Wood shaded band |
-| `kappa` | Weight of the sum-to-zero term |
+| `fit$s` / `fit$alpha` | Wiggly coefficients (alias) |
+| `predict_smooth(..., method="marrawood")` | Pointwise bands (Marra & Wood, 2012) |
+| `plot_smooth()` | Plot estimate + shaded band |
 
-Multivariate `cbind()` / `dim=` APIs do not yet accept `s()` terms.
+Multivariate `cbind()` / `dim=` APIs accept **shared** `s()` terms, or
+**domain-specific** `s(x, by = dim)` with long data + `dim =`. See the mixed
+vignette and `scripts/fit_COPD_multi_pspline.R`.
+
+# References
+
+Eilers, P. H. C. (1999). Discussion of Currie and Durban.
+*Journal of the Royal Statistical Society: Series C*, **48**, 269–270.
+
+Marra, G. and Wood, S. N. (2012). Coverage properties of confidence intervals
+for generalized additive model components.
+*Scandinavian Journal of Statistics*, **39**(1), 53–74.
+doi:[10.1111/j.1467-9469.2011.00760.x](https://doi.org/10.1111/j.1467-9469.2011.00760.x)
