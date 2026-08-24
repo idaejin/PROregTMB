@@ -12,6 +12,7 @@ inst/TMB/*.so
 scripts/bench_out/*.log
 scripts/bench_out/*.rds
 scripts/out_*/
+scripts/sim_wwbw_smmr/out/
 scripts/tmb/
 vignettes/*.html
 vignettes/*_files/

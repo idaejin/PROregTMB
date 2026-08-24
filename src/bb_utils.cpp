@@ -53,7 +53,7 @@ NumericVector ldbb_cpp(NumericVector y, NumericVector m, NumericVector p,
   return out;
 }
 
-// Pointwise SE for f = B alpha with dense cov V: se_i = sqrt(B_i V B_i')
+// Pointwise SE for f = Z s with dense cov V: se_i = sqrt(Z_i V Z_i')
 // [[Rcpp::export]]
 NumericVector smooth_se_cpp(NumericMatrix B, NumericMatrix V) {
   const int n = B.nrow();

@@ -16,8 +16,6 @@
 #'   `nlminb`. `"bayes"`: same point fit, then NUTS via
 #'   [tmbstan::tmbstan()] on a template with weak priors
 #'   (parametric models only; no `s()` yet).
-#' @param kappa Ignored (kept for API compatibility). Null-space of the
-#'   P-spline is in the fixed design.
 #' @param maxiter Maximum `nlminb` iterations.
 #' @param control Passed to [stats::nlminb()].
 #' @param silent Suppress TMB tracing.
@@ -28,7 +26,6 @@
 #' @export
 BBreg <- function(formula, m, data = list(),
                   method = c("mle", "bayes"),
-                  kappa = 1e6,
                   maxiter = 100, control = list(), silent = TRUE,
                   chains = 2L, iter = 1000L, warmup = 400L, seed = 1L) {
   method <- match.arg(method)
@@ -133,9 +130,7 @@ BBreg <- function(formula, m, data = list(),
 
   lambda <- numeric(0)
   smooth_sd <- numeric(0)
-  alpha <- numeric(0)
   s_hat <- numeric(0)
-  alpha.vcov <- NULL
   s.vcov <- NULL
   fhat <- list()
   if (sm$n_smooth > 0L) {
@@ -147,18 +142,16 @@ BBreg <- function(formula, m, data = list(),
       error = function(e) rep(NA_real_, ncol(sm$Zs))
     )
     names(s_hat) <- colnames(sm$Zs)
-    alpha <- s_hat
     for (j in seq_len(sm$n_smooth)) {
       idx <- sm$blocks_idx[[j]]
       fhat[[j]] <- as.numeric(sm$Zs[, idx, drop = FALSE] %*% s_hat[idx])
     }
     names(fhat) <- sm$labels
-    s.vcov <- .alpha_vcov_from_joint(
+    s.vcov <- .s_vcov_from_joint(
       if (!is.null(sdr)) sdr$jointPrecision else NULL,
-      n_alpha = length(s_hat),
+      n_s = length(s_hat),
       n_u = 0L
     )
-    alpha.vcov <- s.vcov
   }
 
   if (!is.null(sdr)) {
@@ -232,12 +225,9 @@ BBreg <- function(formula, m, data = list(),
     smooth = if (sm$n_smooth > 0L) sm else NULL,
     s = if (length(s_hat)) s_hat else NULL,
     s.vcov = s.vcov,
-    alpha = if (length(alpha)) alpha else NULL,
-    alpha.vcov = alpha.vcov,
     smooth_sd = if (length(smooth_sd)) smooth_sd else NULL,
     lambda = if (length(lambda)) lambda else NULL,
     fhat = if (length(fhat)) fhat else NULL,
-    kappa = kappa,
     posterior = NULL,
     stanfit = NULL,
     time_bayes = NA_real_

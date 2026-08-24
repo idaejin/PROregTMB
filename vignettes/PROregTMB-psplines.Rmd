@@ -33,8 +33,7 @@ f_j = X_{\mathrm{null},j}\beta_{\mathrm{null},j} + Z_j s_j,
 
 For each smooth, \(Z_j = B D'(DD')^{-1}\) from the Eilers–Marx B-spline
 basis and difference penalty of order `pord`, residualised against the
-fixed design so the polynomial null space lives in \(X\) (not in a
-penalised GMRF with \(\kappa\)).
+fixed design so the polynomial null space lives in \(X\).
 
 Wiggly coefficients \(s_j\) are integrated out by Laplace approximation;
 smooth SDs \(\sigma_{s_j}\) are estimated jointly (`smooth_sd` on the fit;
@@ -175,7 +174,7 @@ legend("topright", c("true (centered)", "estimate", "95% band"),
 | `fit$smooth_sd` | Estimated smooth RE SDs \(\sigma_s\) |
 | `fit$lambda` | Alias \(1/\sigma_s^2\) |
 | `fit$fhat` | Fitted smooths at observed design |
-| `fit$s` / `fit$alpha` | Wiggly coefficients (alias) |
+| `fit$s` | Wiggly coefficients \(s\) |
 | `predict_smooth(..., method="marrawood")` | Pointwise bands (Marra & Wood, 2012) |
 | `plot_smooth()` | Plot estimate + shaded band |
 

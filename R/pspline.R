@@ -462,7 +462,7 @@ s <- function(x, ndx = 10L, pord = 2L, bdeg = 3L,
 
 #' TMB data block for Eilers smooths
 #' @keywords internal
-.tmb_smooth_data <- function(sm, n, kappa = 1e6) {
+.tmb_smooth_data <- function(sm, n) {
   if (is.null(sm) || sm$n_smooth < 1L) {
     return(list(
       n_smooth = 0L,
@@ -610,12 +610,11 @@ predict_smooth <- function(object, which = 1L, x = NULL, level = 0.95,
   if (se_method == "none") {
     # Legacy / fallback: wiggly block only
     Vfull <- object$s.vcov
-    if (is.null(Vfull) && !is.null(object$alpha.vcov)) Vfull <- object$alpha.vcov
     if (is.null(Vfull) && !is.null(object$sdreport)) {
       n_u <- if (inherits(object, "BBmm")) object$nRand else 0L
-      Vfull <- .alpha_vcov_from_joint(
+      Vfull <- .s_vcov_from_joint(
         object$sdreport$jointPrecision,
-        n_alpha = length(object$s),
+        n_s = length(object$s),
         n_u = n_u
       )
     }

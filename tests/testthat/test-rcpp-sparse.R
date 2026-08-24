@@ -42,7 +42,7 @@ test_that("predict_smooth SE via Rcpp + sparse jointPrecision path", {
   dat <- data.frame(y, x)
   fit <- BBreg(y ~ s(x, ndx = 8), m = m, data = dat, silent = TRUE)
   expect_identical(fit$conv, "yes")
-  expect_true(!is.null(fit$alpha.vcov))
+  expect_true(!is.null(fit$s.vcov))
   pr <- predict_smooth(fit, which = 1L, x = seq(0, 1, length.out = 40))
   expect_true(all(c("se", "lwr", "upr") %in% names(pr)))
   expect_true(all(is.finite(pr$se)))

@@ -1,0 +1,520 @@
+---
+title: "PROreg vs PROregTMB"
+author: "Dae-Jin Lee"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{PROreg vs PROregTMB}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 6.5,
+  fig.height = 3.8,
+  dpi = 120
+)
+# Prefer namespace calls. Do not library(PROreg) and library(PROregTMB)
+# together: S3 print/summary methods clash.
+has_proreg <- requireNamespace("PROreg", quietly = TRUE)
+```
+
+# Overview
+
+[PROreg](https://cran.r-project.org/package=PROreg) is the original CRAN
+package for beta-binomial (BB) regression for patient-reported outcomes.
+**PROregTMB** reimplements the core likelihood with
+[TMB](https://github.com/kaskr/adcomp) (AD + Laplace) and extends the
+mixed-model API.
+
+This note has two parts:
+
+1. **Comparable cases** — designs that both `PROreg` and `PROregTMB` can
+   fit, with side-by-side estimates.
+2. **PROregTMB-only** — models that `PROregTMB::BBmm` (and related helpers)
+   can address beyond the PROreg surface.
+
+```{r lib}
+library(PROregTMB)
+```
+
+```{r check-proreg, echo=FALSE}
+if (!has_proreg) {
+  message("PROreg is not installed; comparison chunks will be skipped. ",
+          "Install with install.packages(\"PROreg\").")
+}
+```
+
+| Feature | `PROreg` | `PROregTMB` |
+|---------|:--------:|:-----------:|
+| `BBreg` (marginal BB logistic) | yes | yes (TMB) |
+| `BBmm` RI via `random.formula = ~ id` | yes | yes |
+| `BBmm` crossed RI (`~ site + doc`) | yes | yes |
+| Manual `Z` + `nRandComp` | yes | yes |
+| Multi via stacked `y` + `nDim` | yes (manual) | prefer `cbind` / `dim=` |
+| `random = ~ (1 \| id)` (lme4-style) | no | yes |
+| RI + random slope + \(G\) corr | no | yes |
+| Domain RE M2/M3 (`(0+dim\|id)`) | no | yes |
+| Additive `s()` P-splines | no | yes |
+| One-stage joint `BBjm` (BB + Weibull) | no (TSBB two-stage) | yes |
+
+Estimation note: PROreg `BBmm` uses h-likelihood / adjusted profile
+(BB-Delta or NR). PROregTMB maximises the **Laplace** approximate
+marginal likelihood. With a weak RE signal, \(\widehat\sigma\) can differ
+(PROreg keeps a small positive SD; TMB may shrink toward 0). With many
+groups and smaller \(\phi\), estimates usually match closely (see README).
+
+---
+
+# 1. Comparable cases
+
+## 1.1 `BBreg`: marginal BB logistic
+
+Same formula API: `BBreg(y ~ x, m)`.
+
+```{r cmp-BBreg, eval=has_proreg}
+set.seed(18)
+k <- 800
+m <- 10L
+x <- rnorm(k, 5, 3)
+beta_true <- c(-10, 2)
+phi_true <- 1.2
+p <- 1 / (1 + exp(-(beta_true[1] + beta_true[2] * x)))
+y <- rBB(k, m, p, phi_true)
+
+fit_tmb <- PROregTMB::BBreg(y ~ x, m, silent = TRUE)
+fit_old <- PROreg::BBreg(y ~ x, m)
+
+cmp_reg <- data.frame(
+  param = c("beta0", "beta1", "phi"),
+  true = c(beta_true, phi_true),
+  PROregTMB = c(as.numeric(fit_tmb$beta), fit_tmb$phi),
+  PROreg = c(as.numeric(fit_old$coefficients), fit_old$phi)
+)
+cmp_reg$diff <- cmp_reg$PROregTMB - cmp_reg$PROreg
+knitr::kable(cmp_reg, digits = 4,
+             caption = "BBreg parity (marginal BB logistic).")
+```
+
+```{r cmp-BBreg-meta, eval=has_proreg}
+c(
+  TMB_nll = round(fit_tmb$nll, 4),
+  TMB_conv = fit_tmb$conv,
+  PROreg_conv = fit_old$conv,
+  TMB_iter = fit_tmb$iter,
+  PROreg_iter = fit_old$iter
+)
+```
+
+## 1.2 `BBmm`: random intercept (legacy `random.formula`)
+
+Comparable call (PROreg man-page style):
+
+```r
+PROreg::BBmm(fixed.formula = y ~ x, random.formula = ~ z, m = m, data = dat)
+PROregTMB::BBmm(fixed.formula = y ~ x, random.formula = ~ z, m = m, data = dat)
+```
+
+### A) Few groups / moderate \(\phi\) (weak RE — \(\sigma\) may differ)
+
+```{r cmp-BBmm-A, eval=has_proreg}
+set.seed(7)
+k <- 100
+m <- 10L
+phi <- 0.5
+beta <- c(1.5, -1.1)
+sigma <- 0.5
+x <- runif(k, 0, 10)
+z <- as.factor(PROreg::rBI(k, 4, 0.5, 2))
+Z <- model.matrix(~ z - 1)
+u <- rnorm(nlevels(z), 0, sigma)
+eta <- beta[1] + beta[2] * x + as.numeric(Z %*% u)
+y <- rBB(k, m, 1 / (1 + exp(-eta)), phi)
+dat_A <- data.frame(y, x, z)
+
+fit_old_A <- PROreg::BBmm(
+  fixed.formula = y ~ x, random.formula = ~ z, m = m, data = dat_A
+)
+fit_tmb_A <- PROregTMB::BBmm(
+  fixed.formula = y ~ x, random.formula = ~ z, m = m, data = dat_A,
+  silent = TRUE
+)
+
+cmp_A <- data.frame(
+  param = c("beta0", "beta1", "phi", "sigma"),
+  true = c(beta, phi, sigma),
+  PROregTMB = c(as.numeric(fit_tmb_A$beta), fit_tmb_A$phi,
+                as.numeric(fit_tmb_A$sigma)),
+  PROreg = c(as.numeric(fit_old_A$fixed.coef), fit_old_A$phi.coef,
+             as.numeric(fit_old_A$sigma.coef))
+)
+cmp_A$diff <- cmp_A$PROregTMB - cmp_A$PROreg
+knitr::kable(cmp_A, digits = 4,
+             caption = "BBmm RI parity — design A (few levels).")
+cor_u_A <- cor(fit_tmb_A$u, fit_old_A$random.coef)
+```
+
+```{r cmp-BBmm-A-meta, eval=has_proreg}
+c(cor_u = round(cor_u_A, 4),
+  TMB_conv = fit_tmb_A$conv, PROreg_conv = fit_old_A$conv,
+  TMB_nll = round(fit_tmb_A$nll, 3))
+```
+
+### B) Many groups / smaller \(\phi\) (identifiable RE)
+
+```{r cmp-BBmm-B, eval=has_proreg}
+set.seed(42)
+n_g <- 40
+n_per <- 8
+k <- n_g * n_per
+m <- 10L
+phi <- 0.15
+beta <- c(0.5, -0.4)
+sigma <- 0.8
+x <- rnorm(k)
+z <- factor(rep(seq_len(n_g), each = n_per))
+u <- rnorm(n_g, 0, sigma)
+eta <- beta[1] + beta[2] * x + u[z]
+y <- rBB(k, m, 1 / (1 + exp(-eta)), phi)
+dat_B <- data.frame(y, x, z)
+
+fit_old_B <- PROreg::BBmm(
+  fixed.formula = y ~ x, random.formula = ~ z, m = m, data = dat_B
+)
+fit_tmb_B <- PROregTMB::BBmm(
+  fixed.formula = y ~ x, random.formula = ~ z, m = m, data = dat_B,
+  silent = TRUE
+)
+
+cmp_B <- data.frame(
+  param = c("beta0", "beta1", "phi", "sigma"),
+  true = c(beta, phi, sigma),
+  PROregTMB = c(as.numeric(fit_tmb_B$beta), fit_tmb_B$phi,
+                as.numeric(fit_tmb_B$sigma)),
+  PROreg = c(as.numeric(fit_old_B$fixed.coef), fit_old_B$phi.coef,
+             as.numeric(fit_old_B$sigma.coef))
+)
+cmp_B$diff <- cmp_B$PROregTMB - cmp_B$PROreg
+knitr::kable(cmp_B, digits = 4,
+             caption = "BBmm RI parity — design B (many groups).")
+```
+
+Equivalent modern call in PROregTMB (same RI model; no PROreg needed):
+
+```{r cmp-BBmm-modern, eval=TRUE}
+set.seed(42)
+n_g <- 40
+n_per <- 8
+m <- 10L
+dat_mod <- data.frame(
+  x = rnorm(n_g * n_per),
+  z = factor(rep(seq_len(n_g), each = n_per))
+)
+u <- rnorm(n_g, 0, 0.8)
+dat_mod$y <- rBB(
+  nrow(dat_mod), m,
+  1 / (1 + exp(-(0.5 - 0.4 * dat_mod$x + u[dat_mod$z]))), 0.15
+)
+fit_modern <- BBmm(
+  y ~ x, random = ~ (1 | z), m = m, data = dat_mod, silent = TRUE
+)
+c(beta = unname(fit_modern$beta), phi = fit_modern$phi,
+  sigma = unname(fit_modern$sigma), conv = fit_modern$conv)
+```
+
+## 1.3 What “comparable” does *not* include
+
+- **Multidimensional PROreg** (`nDim > 1` with stacked `y`) is possible but
+  awkward; PROregTMB’s supported multi API is `cbind` / `dim=` (Section 2).
+  Do not treat stacked-`nDim` as a routine parity check.
+- **Estimation target**: Laplace marginal (TMB) vs adjusted profile
+  h-likelihood (PROreg) — expect close \(\beta,\phi\) when RE are
+  identifiable; \(\sigma\) is the sensitive quantity.
+
+Batch scripts: `scripts/parity_BBreg.R`, `scripts/parity_BBmm.R`.
+
+---
+
+# 2. Cases `PROregTMB::BBmm` can address (beyond PROreg)
+
+These designs have **no** direct `PROreg::BBmm` counterpart (formula /
+`corr` / `s()` API). Illustrations only; see also the mixed and P-spline
+vignettes.
+
+## 2.1 Random intercept + random slope with correlation
+
+\[
+\operatorname{logit}(p_{ij}) = x_{ij}^\top\beta + a_i + b_i\, t_{ij},
+\quad (a_i,b_i)^\top \sim N(0,G).
+\]
+
+```{r ext-rs, eval=TRUE}
+set.seed(99)
+n_g <- 35
+n_per <- 6
+m <- 10L
+id <- factor(rep(seq_len(n_g), each = n_per))
+time <- as.numeric(rep(seq_len(n_per), times = n_g))
+time_c <- as.numeric(scale(time))
+Sigma <- matrix(c(0.55, -0.15, -0.15, 0.20), 2, 2)
+U <- matrix(rnorm(n_g * 2), n_g, 2) %*% chol(Sigma)
+x <- rnorm(n_g * n_per)
+eta <- 0.2 - 0.15 * x + U[id, 1] + U[id, 2] * time_c
+y <- rBB(length(x), m, 1 / (1 + exp(-eta)), 0.15)
+dat_rs <- data.frame(y, x, id, time = time_c)
+
+fit_rs <- BBmm(
+  y ~ x + time, random = ~ (1 + time | id),
+  corr = "unstructured", m = m, data = dat_rs, silent = TRUE
+)
+fit_rs$sigma
+round(fit_rs$Corr$id, 3)
+```
+
+Use `corr = "diag"` for independent RI and RS.
+
+## 2.2 Multivariate shared latent (`cbind` / `dim=`)
+
+Canonical form:
+
+\[
+\operatorname{logit}(p_{ij}^{(\ell)})
+= x_{ij}^{(\ell)\top}\beta^{(\ell)} + z_{ij}^\top a_i,
+\quad a_i \sim N(0,G).
+\]
+
+**Wide (cross-sectional):**
+
+```{r ext-cbind, eval=TRUE}
+set.seed(44)
+n <- 60
+id <- factor(seq_len(n))
+x <- rnorm(n)
+a <- rnorm(n, 0, 0.55)
+dat_w <- data.frame(
+  id = id, x = x,
+  y1 = rBB(n, 20L, 1 / (1 + exp(-(0.2 - 0.3 * x + a))), 0.15),
+  y2 = rBB(n, 10L, 1 / (1 + exp(-(-0.1 + 0.4 * x + a))), 0.2)
+)
+fit_w <- BBmm(
+  cbind(y1, y2) ~ x, random = ~ (1 | id),
+  m = c(20, 10), data = dat_w, silent = TRUE
+)
+fit_w$beta
+fit_w$phi
+fit_w$sigma
+```
+
+**Long + domain column:**
+
+```{r ext-long, eval=TRUE}
+set.seed(45)
+n_g <- 40
+id <- factor(rep(seq_len(n_g), each = 2))
+domain <- factor(rep(c("SF36", "ACT"), times = n_g))
+x <- rnorm(n_g * 2)
+a <- rnorm(n_g, 0, 0.5)[as.integer(id)]
+m_vec <- ifelse(domain == "SF36", 20L, 10L)
+eta <- ifelse(domain == "SF36", 0.1, -0.2) + 0.25 * x + a
+long <- data.frame(
+  y = rBB(length(x), m_vec, 1 / (1 + exp(-eta)), 0.18),
+  x, id, domain, m = m_vec
+)
+fit_l <- BBmm(
+  y ~ x, random = ~ (1 | id), dim = "domain",
+  m = "m", data = long, silent = TRUE
+)
+fit_l$beta
+fit_l$phi
+```
+
+## 2.3 Domain-specific RE: M2 / M3
+
+Long format only. \(u_i\sim N(0,\Sigma)\) with one RE per domain:
+
+```{r ext-M3, eval=TRUE}
+set.seed(42)
+n_g <- 45
+L <- 3L
+id <- factor(rep(seq_len(n_g), each = L))
+domain <- factor(rep(c("Impacts", "Symptoms", "Activity"), times = n_g))
+x <- rnorm(n_g * L)
+Sigma_true <- matrix(c(
+  0.50, 0.20, 0.15,
+  0.20, 0.40, 0.10,
+  0.15, 0.10, 0.30
+), 3, 3)
+U <- matrix(rnorm(n_g * 3), n_g, 3) %*% chol(Sigma_true)
+u <- U[cbind(as.integer(id), as.integer(domain))]
+eta <- 0.2 * x + u
+dat_m <- data.frame(
+  y = rBB(length(x), 12L, 1 / (1 + exp(-eta)), 0.18),
+  x, id, domain, m = 12L
+)
+
+# M3: correlated domain RE
+fit_m3 <- BBmm(
+  y ~ x, random = ~ (0 + domain | id), dim = "domain",
+  corr = "unstructured", m = "m", data = dat_m,
+  silent = TRUE, maxiter = 200
+)
+round(fit_m3$Corr$id, 3)
+fit_m3$sigma
+
+# M2: independent domain RE
+fit_m2 <- BBmm(
+  y ~ x, random = ~ (0 + domain | id), dim = "domain",
+  corr = "diag", m = "m", data = dat_m, silent = TRUE
+)
+fit_m2$Corr$id
+```
+
+**M1** remains `random = ~ (1 | id)` (shared intercept across domains).
+
+## 2.4 Additive P-splines in `BBmm`
+
+Eilers (1999) mixed map \(f = X_{\mathrm{null}}\beta_{\mathrm{null}} + Zs\),
+\(s\sim N(0,\sigma_s^2 I)\). Shared across dimensions, or
+`s(x, by = domain)` on long data.
+
+```{r ext-pspline, eval=TRUE}
+set.seed(46)
+n_g <- 30
+n_per <- 5
+id <- factor(rep(seq_len(n_g), each = n_per))
+time <- runif(n_g * n_per)
+u <- rnorm(n_g, 0, 0.4)[as.integer(id)]
+f <- sin(2 * pi * time)
+y <- rBB(length(time), 10L, 1 / (1 + exp(-(0.1 + f + u))), 0.2)
+dat_s <- data.frame(y, time, id)
+
+fit_s <- BBmm(
+  y ~ s(time, ndx = 8), random = ~ (1 | id),
+  m = 10L, data = dat_s, silent = TRUE
+)
+fit_s$smooth_sd
+sum(fit_s$fhat[[1]])   # near 0 after centering
+```
+
+Bands: `predict_smooth()` / `plot_smooth()` (Marra–Wood).
+
+## 2.5 One-stage joint model (`BBjm`)
+
+PROreg has **no** one-stage joint PRO–survival model. The usual PROreg
+workflow is **two-stage TSBB**: fit a longitudinal BB mixed model, then plug
+subject-specific trajectories into a Cox (or similar) survival step.
+
+**PROregTMB::BBjm** fits a shared-parameter joint model in **one** TMB /
+Laplace optimisation:
+
+\[
+\begin{aligned}
+y_{ij}\mid u_i &\sim \mathrm{BB}(m,p_{ij},\phi),\\
+\operatorname{logit}(p_{ij})
+&=(\beta_0+u_{i0})+(\beta_1+u_{i1})\,t_{ij},\\
+h_i(t)
+&= w_1 w_2 t^{w_2-1}\exp\{\alpha\, m_i(t)\},
+\end{aligned}
+\]
+
+with current-value link
+\(m_i(t)=m\,\operatorname{logit}^{-1}
+\bigl((\beta_0+u_{i0})+(\beta_1+u_{i1})t\bigr)\),
+\(u_{i0}\sim N(0,\sigma_0^2)\), \(u_{i1}\sim N(0,\sigma_1^2)\)
+(independent in the current template), and Weibull baseline \((w_1,w_2)\).
+The association parameter \(\alpha\) is estimated **jointly** with the
+longitudinal BB parameters (not in a second stage).
+
+| | Two-stage TSBB | One-stage `BBjm` |
+|--|----------------|------------------|
+| Packages | PROreg or PROregTMB `BBmm` + `survival::coxph` | `PROregTMB::BBjm` only |
+| Longitudinal | BB RI+RS | BB RI+RS (same structure) |
+| Survival | Cox (plug-in \(m_i(t)\)) | Weibull PH + \(\alpha m_i(t)\) |
+| Uncertainty in stage 1 | ignored in stage 2 | shared likelihood / Laplace |
+| Typical use | fast benchmark / legacy | joint inference on \(\alpha\) |
+
+Data layout:
+
+- `long`: columns `id`, `time`, `y` (BB score \(0,\ldots,m\))
+- `surv`: one row per `id` with `id`, `time`, `status` (1 = event)
+
+```{r ext-bbjm, eval=TRUE}
+# Small simulated joint sample (see scripts/demo_BBjm.R for full TSBB compare)
+set.seed(11)
+N <- 40L
+m_jm <- 20L
+visits <- c(0, 1, 2, 4)
+u0 <- rnorm(N, 0, 0.5)
+u1 <- rnorm(N, 0, 0.2)
+long_l <- list()
+surv_jm <- data.frame(id = seq_len(N), time = NA_real_, status = NA_integer_)
+for (i in seq_len(N)) {
+  # Simple exponential-like event times (illustration only; not the Weibull DGP)
+  Ti <- rexp(1, rate = 0.08 * exp(0.05 * m_jm *
+                                    (1 / (1 + exp(-( -0.5 + u0[i]))))))
+  Ti <- min(Ti, max(visits) + 1)
+  delta <- as.integer(Ti < max(visits) + 1 - 1e-8)
+  surv_jm$time[i] <- Ti
+  surv_jm$status[i] <- delta
+  tj <- visits[visits <= Ti + 1e-8]
+  if (!length(tj)) tj <- 0
+  eta <- -0.5 + u0[i] + (0.05 + u1[i]) * tj
+  long_l[[i]] <- data.frame(
+    id = i, time = tj,
+    y = rBB(length(tj), m_jm, 1 / (1 + exp(-eta)), 0.2)
+  )
+}
+long_jm <- do.call(rbind, long_l)
+
+fit_jm <- BBjm(long_jm, surv_jm, m = m_jm, silent = TRUE, maxiter = 150)
+c(
+  beta0 = unname(fit_jm$fixed.coef[1]),
+  beta1 = unname(fit_jm$fixed.coef[2]),
+  phi = fit_jm$phi,
+  alpha = fit_jm$alpha,
+  conv = fit_jm$conv
+)
+```
+
+COPD sketch (Activity + incident fall): prepare `long` / `surv` from the
+COPD panel, then `BBjm(long, surv, m = 30)`. README reports a pilot with
+\(\widehat\alpha \approx 0.089\) close to TSBB \(\approx 0.085\).
+
+Scripts: `scripts/demo_BBjm.R`, `scripts/sim_BBjm_vs_TSBB.R`. Precomputed
+pilot tables live in the results vignette.
+
+**Limits of current `BBjm`:** univariate longitudinal BB (no multi-PRO /
+`s()` / `dim=` inside the joint); RI+RS with diagonal \(\sigma_0,\sigma_1\)
+(no \(a\)–\(b\) correlation in the joint template); Weibull PH only.
+Broader joint modelling is the separate Stan / JMBB line (`bob-JMBB`).
+
+---
+
+# 3. Practical mapping
+
+| You want… | PROreg | PROregTMB |
+|-----------|--------|-----------|
+| Marginal BB logistic | `BBreg(y~x,m)` | `BBreg(y~x,m)` |
+| RI mixed BB | `BBmm(..., random.formula=~id)` | same, or `random=~(1\|id)` |
+| Shared slope + corr \(G\) | — | `random=~(1+time\|id)`, `corr=` |
+| Multi PRO, shared latent | stacked `y` + `nDim` | `cbind` / `dim=` |
+| Correlated domain RE | — | `(0+domain\|id)` + `corr="unstructured"` |
+| Smooth within / by domain | — | `s()` / `s(..., by=)` |
+| One-stage BB + survival | — (use TSBB) | `BBjm(long, surv, m)` |
+| Speed on large \(N\) | slower | typically faster after compile |
+
+**Session tip:** call `PROreg::` / `PROregTMB::` explicitly; avoid attaching
+both packages (S3 `print`/`summary` clash).
+
+# References
+
+Najera-Zuloaga, J., Lee, D.-J. and Arostegui, I. (2018, 2019, 2023).
+Beta-binomial regression / mixed / multidimensional PRO models
+(*SMMR*, *Biometrical Journal*, *Statistical Modelling*).
+
+Kristensen, K., Nielsen, A., Berg, C. W., Skaug, H. and Bell, B. (2016).
+TMB: Automatic differentiation and Laplace approximation.
+*Journal of Statistical Software*, **70**(5), 1–21.

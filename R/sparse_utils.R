@@ -1,4 +1,4 @@
-## Sparse helpers: Z RE design and Marra–Wood Bayesian Cov(alpha)
+## Sparse helpers: Z RE design and Marra–Wood Bayesian Cov(s)
 
 #' Marginal covariance block from TMB jointPrecision
 #'
@@ -31,44 +31,43 @@
   }, error = function(e) NULL)
 }
 
-#' Marginal Cov(alpha) from TMB jointPrecision (Marra–Wood Bayesian CI)
+#' Marginal Cov(s) from TMB jointPrecision (Marra–Wood Bayesian CI)
 #'
-#' For random effects stacked as \code{(u, alpha)}, the Marra–Wood (2012)
-#' Bayesian covariance of the spline coefficients is the **marginal**
-#' block of \eqn{Q^{-1}}, i.e. \code{solve(Q)[alpha, alpha]}, obtained via a
-#' sparse solve against the alpha identity columns (not
-#' \code{solve(Q[alpha,alpha])}, which ignores dependence on subject RE).
+#' For random effects stacked as \code{(u, s)}, the Marra–Wood (2012)
+#' Bayesian covariance of the wiggly spline coefficients is the **marginal**
+#' block of \eqn{Q^{-1}}, i.e. \code{solve(Q)[s, s]}, obtained via a
+#' sparse solve against the \code{s} identity columns (not
+#' \code{solve(Q[s,s])}, which ignores dependence on subject RE).
 #'
 #' @param jointPrecision Sparse/dense joint precision from `sdreport`.
-#' @param n_alpha Number of spline coefficients.
-#' @param n_u Number of subject random effects preceding alpha (BBmm).
-#' @return Dense `n_alpha x n_alpha` covariance, or `NULL`.
+#' @param n_s Number of wiggly spline coefficients.
+#' @param n_u Number of subject random effects preceding \code{s} (BBmm).
+#' @return Dense `n_s x n_s` covariance, or `NULL`.
 #' @keywords internal
-.alpha_vcov_from_joint <- function(jointPrecision, n_alpha, n_u = 0L) {
-  if (is.null(jointPrecision) || n_alpha < 1L) return(NULL)
+.s_vcov_from_joint <- function(jointPrecision, n_s, n_u = 0L) {
+  if (is.null(jointPrecision) || n_s < 1L) return(NULL)
   Jp <- jointPrecision
   if (!inherits(Jp, "Matrix")) {
     Jp <- Matrix::Matrix(as.matrix(Jp), sparse = TRUE)
   }
   rn <- colnames(Jp)
   if (is.null(rn)) rn <- rownames(Jp)
-  a_idx <- integer(0)
+  s_idx <- integer(0)
   if (!is.null(rn)) {
-    a_idx <- which(rn == "alpha" | grepl("^alpha($|\\[)", rn))
-    if (!length(a_idx)) a_idx <- which(rn == "s")
-    if (!length(a_idx)) a_idx <- grep("alpha", rn)
+    s_idx <- which(rn == "s" | grepl("^s($|\\[)", rn))
+    if (!length(s_idx)) s_idx <- grep("^s", rn)
   }
-  if (length(a_idx) != n_alpha) {
+  if (length(s_idx) != n_s) {
     nr <- nrow(Jp)
-    if (as.integer(n_u) + n_alpha == nr) {
-      a_idx <- seq.int(as.integer(n_u) + 1L, as.integer(n_u) + n_alpha)
-    } else if (n_alpha <= nr) {
-      a_idx <- seq.int(nr - n_alpha + 1L, nr)
+    if (as.integer(n_u) + n_s == nr) {
+      s_idx <- seq.int(as.integer(n_u) + 1L, as.integer(n_u) + n_s)
+    } else if (n_s <= nr) {
+      s_idx <- seq.int(nr - n_s + 1L, nr)
     } else {
       return(NULL)
     }
   }
-  .marginal_cov_from_joint(Jp, a_idx)
+  .marginal_cov_from_joint(Jp, s_idx)
 }
 
 #' Joint indices of fixed beta + wiggly s for one smooth (for contrast SE)

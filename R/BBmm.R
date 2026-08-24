@@ -47,8 +47,6 @@
 #' @param m Maximum score (scalar, vector, length-\(L\), or column name).
 #' @param data Data frame.
 #' @param method `"mle"` (default) or `"bayes"`.
-#' @param kappa Ignored (kept for API compatibility). Null-space of the
-#'   P-spline is in the fixed design (Eilers mixed reparameterisation).
 #' @param maxiter Maximum `nlminb` iterations.
 #' @param show Logical; print progress.
 #' @param nDim Number of dimensions (usually auto-set from `cbind` / `dim`).
@@ -68,7 +66,6 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
                  dim = NULL,
                  m, data = list(),
                  method = c("mle", "bayes"),
-                 kappa = 1e6,
                  maxiter = 100, show = FALSE, nDim = 1L,
                  silent = TRUE, control = list(),
                  start = NULL,
@@ -518,9 +515,7 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
                        error = function(e) rep(NA_real_, nRand))
   u_hat <- rand_hat[seq_len(nRand)]
   names(u_hat) <- colnames(Z)
-  alpha <- NULL
   s_hat <- NULL
-  alpha.vcov <- NULL
   s.vcov <- NULL
   lambda <- NULL
   smooth_sd <- NULL
@@ -529,7 +524,6 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
     n_s <- ncol(sm$Zs)
     s_hat <- rand_hat[nRand + seq_len(n_s)]
     names(s_hat) <- colnames(sm$Zs)
-    alpha <- s_hat
     sd_hat <- par_fixed[grep("^log_sds", nm)]
     smooth_sd <- setNames(exp(unname(sd_hat)), sm$labels)
     lambda <- setNames(1 / (smooth_sd^2), sm$labels)
@@ -538,12 +532,11 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
       as.numeric(sm$Zs[, idx, drop = FALSE] %*% s_hat[idx])
     })
     names(fhat) <- sm$labels
-    s.vcov <- .alpha_vcov_from_joint(
+    s.vcov <- .s_vcov_from_joint(
       if (!is.null(sdr)) sdr$jointPrecision else NULL,
-      n_alpha = n_s,
+      n_s = n_s,
       n_u = nRand
     )
-    alpha.vcov <- s.vcov
   }
 
   fixed.vcov <- matrix(NA_real_, length(beta), length(beta),
@@ -651,12 +644,9 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
     smooth = if (isTRUE(sm$n_smooth > 0L)) sm else NULL,
     s = s_hat,
     s.vcov = s.vcov,
-    alpha = alpha,
-    alpha.vcov = alpha.vcov,
     smooth_sd = smooth_sd,
     lambda = lambda,
     fhat = fhat,
-    kappa = kappa,
     opt = opt,
     obj = obj,
     sdreport = sdr,
@@ -694,10 +684,10 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
   }
   # bb_mm_prior is parametric + subject RE only
   drop <- c("n_smooth", "Zs", "s_comp", "B", "S", "C", "smooth_K",
-            "smooth_off", "kappa")
+            "smooth_off")
   data_tmb <- data_tmb[setdiff(names(data_tmb), drop)]
   parameters <- parameters[setdiff(names(parameters),
-                                   c("log_sds", "s", "log_lambda", "alpha"))]
+                                   c("log_sds", "s"))]
   ensure_tmb_dll("bb_mm_prior")
   beta0 <- as.numeric(fit$fixed.coef)
   phi0 <- as.numeric(fit$phi.coef)

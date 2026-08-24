@@ -218,6 +218,7 @@ browseVignettes("PROregTMB")
 | Getting started | `dBB` / `rBB`, `BBest`, `BBreg` |
 | Mixed and multivariate | RI, RI+RS, `cbind` / `dim=`, shared `s()` |
 | Additive P-splines | `s(x, ndx, pord)`, Marra–Wood bands, `plot_smooth` |
+| PROreg vs PROregTMB | Parity cases + TMB-only extensions |
 | Benchmarks and joint-model results | Precomputed pilots (PROreg, TSBB, `BBjm`) |
 
 From source:
