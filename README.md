@@ -82,11 +82,11 @@ fit_rs$sigma; fit_rs$Corr$id; fit_rs$Sigma$id
 
 ### Multivariate shared latent (canonical API)
 
-\[
+$$
 \operatorname{logit}(p_{ij}^{(\ell)})
 = x_{ij}^{(\ell)\top}\beta^{(\ell)} + z_{ij}^{\top} a_i,
 \quad a_i \sim N(0,G).
-\]
+$$
 
 **Wide / cross-sectional** (`cbind`):
 
@@ -99,7 +99,7 @@ BBmm(
 )
 ```
 
-**Long / longitudinal** (`dim =` names the domain column \(\ell\)):
+**Long / longitudinal** (`dim =` names the domain column $\ell$):
 
 ```r
 BBmm(
@@ -128,7 +128,7 @@ BBmm(
 
 Advanced manual stacking remains available via `multi_bb_stack()` (not the preferred interface).
 
-Shared additive P-splines across dimensions (`s()` same for every \(\ell\)),
+Shared additive P-splines across dimensions (`s()` same for every $\ell$),
 or **domain-specific** smooths with `by=` on long data:
 
 ```r
@@ -150,13 +150,13 @@ COPD example script: `scripts/fit_COPD_multi_pspline.R`.
 
 On the logit scale:
 
-\[
+$$
 \operatorname{logit}(p)=X\beta+\sum_j f_j(x_j),\quad
 f_j=X_{\mathrm{null},j}\beta_{\mathrm{null},j}+Z_j s_j,\quad
 s_j\sim N(0,\sigma_{s_j}^2 I),
-\]
+$$
 
-with \(Z_j=B D'(DD')^{-1}\) residualised against \(X\) (null space in the
+with $Z_j=B D'(DD')^{-1}$ residualised against $X$ (null space in the
 fixed design). Notation follows Eilers: `ndx`, `pord`, `bdeg`.
 
 ```r
@@ -176,13 +176,13 @@ BBmm(y ~ s(time, ndx = 10), random = ~ (1 | id), m = m, data = dat)
 
 | Model | Math | Primary fields | PROreg-compatible aliases |
 |-------|------|----------------|---------------------------|
-| `BBreg` | \(\beta\), \(\phi\), \(p\) | `$beta`, `$phi`, `$p` | `$coefficients`, `$fitted.values` |
-| `BBmm` | \(\beta\), \(a\)/\(u\), \(G\), \(\phi\) | `$beta`, `$u`, `$sigma`, `$Sigma`, `$Corr`, `$phi` | `$fixed.coef`, `$random.coef`, `$sigma.coef`, `$phi.coef` |
+| `BBreg` | $\beta$, $\phi$, $p$ | `$beta`, `$phi`, `$p` | `$coefficients`, `$fitted.values` |
+| `BBmm` | $\beta$, $a$/$u$, $G$, $\phi$ | `$beta`, `$u`, `$sigma`, `$Sigma`, `$Corr`, `$phi` | `$fixed.coef`, `$random.coef`, `$sigma.coef`, `$phi.coef` |
 
 ### One-stage joint model (`BBjm`)
 
 Shared RI/RS beta-binomial longitudinal model + Weibull PH survival with
-current-value association \(\alpha\, m_i(t)\).
+current-value association $\alpha\,m_i(t)$.
 
 ```r
 # long: id, time, y (BB score); surv: id, time, status (1 = event)
@@ -192,9 +192,9 @@ summary(fit_jm)
 
 **COPD application (St George ACTIVITY + incident fall).** Time in days since
 baseline; ACTIVITY binned to 0–24 (`m = 30`); exclude baseline falls.
-On N = 506 (110 events): \(\hat\alpha \approx 0.089\) (SE 0.019, p < 0.001) —
+On N = 506 (110 events): $\hat\alpha \approx 0.089$ (SE 0.019, p < 0.001) —
 higher predicted activity limitation is associated with higher fall hazard.
-Two-stage TSBB on the same data gave \(\hat\alpha \approx 0.085\).
+Two-stage TSBB on the same data gave $\hat\alpha \approx 0.085$.
 
 Sketch of the data prep used in that analysis:
 
@@ -249,7 +249,7 @@ Rscript scripts/demo_BBjm.R
 **Pilot takeaways**
 
 - Multi-RE / multi-outcome `BBmm`: estimates close to PROreg; TMB typically **~3–30×** faster after one-time compile.
-- TSBB with TMB stage-1: \(\hat\alpha\) matches PROreg stage-1 (~30–47× faster on the pilot).
-- BBjm vs TSBB (TMB stage-1): similar bias/CP for \(\alpha\); TSBB faster; both 100% conv on the pilot.
+- TSBB with TMB stage-1: $\hat\alpha$ matches PROreg stage-1 (~30–47× faster on the pilot).
+- BBjm vs TSBB (TMB stage-1): similar bias/CP for $\alpha$; TSBB faster; both 100% conv on the pilot.
 
-**Note on `BBmm`:** when the random-effect signal is weak (few groups / large \(\phi\)), ML Laplace can shrink \(\sigma\to 0\) while PROreg's adjusted profile h-likelihood keeps a small positive value. With identifiable designs (many groups, smaller \(\phi\)), estimates match closely.
+**Note on `BBmm`:** when the random-effect signal is weak (few groups / large $\phi$), ML Laplace can shrink $\sigma\to 0$ while PROreg's adjusted profile h-likelihood keeps a small positive value. With identifiable designs (many groups, smaller $\phi$), estimates match closely.
