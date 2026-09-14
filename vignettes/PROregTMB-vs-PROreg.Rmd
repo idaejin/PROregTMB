@@ -60,6 +60,7 @@ if (!has_proreg) {
 | Domain RE M2/M3 (`(0+dim\|id)`) | no | yes |
 | Additive `s()` P-splines | no | yes |
 | One-stage joint `BBjm` (BB + Weibull) | no (TSBB two-stage) | yes |
+| Bayes via `tmbstan` (`method = "bayes"`) | no | yes (parametric; see §2.6) |
 
 Estimation note: PROreg `BBmm` uses h-likelihood / adjusted profile
 (BB-Delta or NR). PROregTMB maximises the **Laplace** approximate
@@ -491,6 +492,37 @@ pilot tables live in the results vignette.
 (no \(a\)–\(b\) correlation in the joint template); Weibull PH only.
 Broader joint modelling is the separate Stan / JMBB line (`bob-JMBB`).
 
+## 2.6 Bayesian sampling with `tmbstan`
+
+Beyond Laplace ML, `BBreg` and `BBmm` accept `method = "bayes"`: after the
+usual TMB point fit, NUTS is run on a prior-augmented template via
+[tmbstan](https://github.com/kaskr/tmbstan) (Suggests: `tmbstan`, `rstan`).
+Weakly informative priors; posterior summary is attached as `$posterior`
+(and `$stanfit`).
+
+```r
+# Parametric models only (no s() yet)
+BBreg(y ~ x, m = m, data = dat, method = "bayes",
+      chains = 2, iter = 1000, warmup = 400)
+
+BBmm(y ~ x, random = ~ (1 | id), m = m, data = dat,
+     method = "bayes", laplace_bayes = TRUE)
+```
+
+| Control | Role |
+|---------|------|
+| `method = "bayes"` | MLE/Laplace fit, then `tmbstan::tmbstan` |
+| `laplace_bayes` (`BBmm`) | If `TRUE` (default), integrate subject RE with Laplace inside Stan; set `FALSE` for full NUTS on `u` (slower; useful to check Laplace) |
+| `chains`, `iter`, `warmup`, `seed` | Passed to `tmbstan` |
+
+**Limits:** `method = "bayes"` does **not** support `s()` smooths yet;
+`BBjm` has no built-in `tmbstan` path (use Stan/JMBB for full Bayes joints).
+Requires a working Stan toolchain. This is optional validation / uncertainty
+quantification, not a replacement for the default Laplace workflow — and not
+the same as the dedicated Bayesian joint MS (`bob-JMBB`).
+
+Demo script: `scripts/demo_tmbstan_BBreg.R`.
+
 ---
 
 # 3. Practical mapping
@@ -504,6 +536,7 @@ Broader joint modelling is the separate Stan / JMBB line (`bob-JMBB`).
 | Correlated domain RE | — | `(0+domain\|id)` + `corr="unstructured"` |
 | Smooth within / by domain | — | `s()` / `s(..., by=)` |
 | One-stage BB + survival | — (use TSBB) | `BBjm(long, surv, m)` |
+| Posterior via NUTS on TMB | — | `method="bayes"` (+ `tmbstan`) |
 | Speed on large \(N\) | slower | typically faster after compile |
 
 **Session tip:** call `PROreg::` / `PROregTMB::` explicitly; avoid attaching
@@ -518,3 +551,8 @@ Beta-binomial regression / mixed / multidimensional PRO models
 Kristensen, K., Nielsen, A., Berg, C. W., Skaug, H. and Bell, B. (2016).
 TMB: Automatic differentiation and Laplace approximation.
 *Journal of Statistical Software*, **70**(5), 1–21.
+
+Monnahan, C. C. and Kristensen, K. (2018).
+No-U-turn sampling for fast Bayesian inference in ADMB and TMB:
+Introducing the adnuts and tmbstan R packages.
+*PLOS ONE*, **13**(5), e0197954.
