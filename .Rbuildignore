@@ -3,3 +3,10 @@
 ^scripts/bench_out/.*\.log$
 ^vignettes/.*\.html$
 ^vignettes/.*\.R$
+^\.cursor$
+^\.ignore$
+^graphify-out$
+^graft$
+^\.DS_Store$
+^\.Rcheck$
+^PROregTMB\.Rcheck$

@@ -7,6 +7,8 @@ Authors@R: c(
     person("Josu", "Najera-Zuloaga", role = "aut"),
     person("Inmaculada", "Arostegui", role = "aut")
   )
+Author: Dae-Jin Lee [aut, cre], Josu Najera-Zuloaga [aut], Inmaculada Arostegui [aut]
+Maintainer: Dae-Jin Lee <dlee@bcamath.org>
 Description: Reimplementation of beta-binomial regression models from
     PROreg using Template Model Builder (TMB) for automatic differentiation
     and Laplace approximation. Provides cross-sectional BBreg, mixed-effects

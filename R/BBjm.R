@@ -197,7 +197,7 @@ BBjm <- function(long, surv, m, n_quad = 40L, maxiter = 200,
 print.BBjm <- function(x, ...) {
   cat("Call:\t")
   print(x$call)
-  cat("\nOne-stage BB–Weibull joint model (TMB Laplace)\n")
+  cat("\nOne-stage BB-Weibull joint model (TMB Laplace)\n")
   cat("Longitudinal fixed effects:\n")
   print(x$fixed.coef)
   cat("\nphi:", x$phi, "\n")

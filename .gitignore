@@ -9,6 +9,8 @@ inst/TMB/*.o
 inst/TMB/*.so
 *.tar.gz
 .DS_Store
+*.Rcheck/
+src/symbols.rds
 scripts/bench_out/*.log
 scripts/bench_out/*.rds
 scripts/out_*/

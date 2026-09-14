@@ -83,7 +83,7 @@ fit_rs$sigma; fit_rs$Corr$id; fit_rs$Sigma$id
 ### Multivariate shared latent (canonical API)
 
 $$
-\operatorname{logit}(p_{ij}^{(\ell)})
+\mathrm{logit}(p_{ij}^{(\ell)})
 = x_{ij}^{(\ell)\top}\beta^{(\ell)} + z_{ij}^{\top} a_i,
 \quad a_i \sim N(0,G).
 $$
@@ -151,7 +151,7 @@ COPD example script: `scripts/fit_COPD_multi_pspline.R`.
 On the logit scale:
 
 $$
-\operatorname{logit}(p)=X\beta+\sum_j f_j(x_j),\quad
+\mathrm{logit}(p)=X\beta+\sum_j f_j(x_j),\quad
 f_j=X_{\mathrm{null},j}\beta_{\mathrm{null},j}+Z_j s_j,\quad
 s_j\sim N(0,\sigma_{s_j}^2 I),
 $$
