@@ -196,11 +196,10 @@ BBmm <- function(fixed.formula, X, y, random = NULL,
     )
   }
 
+  validated <- .validate_bb_inputs(y = y, m = m., X = X, context = "BBmm")
+  y <- validated$y
+  m. <- validated$m
   if (any(y != as.integer(y))) stop("y must be integer", call. = FALSE)
-  if (any(m. != as.integer(m.)) || min(m.) <= 0) {
-    stop("m must be positive integer(s)", call. = FALSE)
-  }
-  if (any(y < 0 | y > m.)) stop("y must be bounded between 0 and m", call. = FALSE)
   if (is.null(multi) && (nObs %% nDim != 0L)) {
     stop("length(y) must be divisible by nDim", call. = FALSE)
   }

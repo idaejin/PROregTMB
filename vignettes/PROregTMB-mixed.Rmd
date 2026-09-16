@@ -75,18 +75,23 @@ Crossed factors: `random = ~ (1 | site) + (1 | doc)` (or legacy
 
 # Random intercept + random slope
 
+This example uses 80 subjects with eight visits, centered time, and a
+moderate random-slope SD (0.5) with dispersion 0.1 to make both random
+effects identifiable in the simulated sample. Smaller samples with weak
+random slopes can produce nearly singular covariance estimates.
+
 ```{r ri-rs}
 set.seed(43)
-n_g <- 40
-n_per <- 5
+n_g <- 80
+n_per <- 8
 m <- 10L
 id <- factor(rep(seq_len(n_g), each = n_per))
-time <- ave(seq_along(id), id, FUN = function(z) seq_along(z) - 1)
-G <- matrix(c(0.7^2, 0.3 * 0.7 * 0.2,
-              0.3 * 0.7 * 0.2, 0.2^2), 2, 2)
+time <- rep(seq(-1, 1, length.out = n_per), times = n_g)
+G <- matrix(c(0.7^2, 0.3 * 0.7 * 0.5,
+              0.3 * 0.7 * 0.5, 0.5^2), 2, 2)
 a <- matrix(rnorm(n_g * 2), n_g, 2) %*% chol(G)
 eta <- -0.2 + 0.15 * time + a[id, 1] + a[id, 2] * time
-y <- rBB(length(time), m, 1 / (1 + exp(-eta)), phi = 0.2)
+y <- rBB(length(time), m, 1 / (1 + exp(-eta)), phi = 0.1)
 dat_rs <- data.frame(y, time, id)
 
 fit_rs <- BBmm(
@@ -99,6 +104,17 @@ fit_rs <- BBmm(
 fit_rs$sigma
 fit_rs$Sigma$id
 fit_rs$Corr$id
+```
+
+Check the optimizer status, gradient and Hessian together before using
+the standard errors. A small gradient alone does not guarantee a valid
+covariance estimate.
+
+```{r ri-rs-diagnostics}
+fit_rs$opt$convergence
+fit_rs$max_grad
+fit_rs$sdreport$pdHess
+summary(fit_rs$sdreport, "report")
 ```
 
 Use `corr = "diag"` for independent RI and RS. Aliases for unstructured:

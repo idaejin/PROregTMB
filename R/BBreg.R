@@ -1,3 +1,53 @@
+.validate_bb_inputs <- function(y, m, X, context = "model") {
+  if (missing(y) || missing(m) || missing(X)) {
+    stop(sprintf("%s: y, m and X are required.", context), call. = FALSE)
+  }
+
+  X <- as.matrix(X)
+  y <- as.numeric(y)
+  m <- as.numeric(m)
+
+  if (nrow(X) != length(y)) {
+    stop(sprintf("%s: nrow(X) must equal length(y).", context), call. = FALSE)
+  }
+
+  if (length(m) == 1L) {
+    m <- rep(m, length(y))
+  } else if (length(m) != length(y)) {
+    stop(sprintf("%s: m must be scalar or length(y).", context), call. = FALSE)
+  }
+
+  if (any(!is.finite(y))) {
+    stop(sprintf("%s: y must contain only finite values.", context), call. = FALSE)
+  }
+  if (any(!is.finite(m)) || any(m <= 0) || any(m != as.integer(m))) {
+    stop(sprintf("%s: m must be positive integer(s).", context), call. = FALSE)
+  }
+  if (any(y != as.integer(y))) {
+    stop(sprintf("%s: y must be integer-valued counts.", context), call. = FALSE)
+  }
+  if (any(y < 0 | y > m)) {
+    stop(sprintf("%s: y must be bounded between 0 and m.", context), call. = FALSE)
+  }
+
+  list(y = y, m = m)
+}
+
+.bbreg_diagnostics <- function(opt, obj, par = NULL) {
+  if (is.null(par)) {
+    par <- opt$par
+  }
+  grad <- tryCatch(obj$gr(par), error = function(e) rep(NA_real_, length(par)))
+  list(
+    convergence_code = opt$convergence,
+    converged = isTRUE(opt$convergence == 0L),
+    iterations = as.integer(opt$iterations),
+    objective = opt$objective,
+    gradient_norm = if (length(grad) > 0L) sqrt(sum(as.numeric(grad)^2, na.rm = TRUE)) else NA_real_,
+    max_abs_gradient = if (length(grad) > 0L) max(abs(as.numeric(grad)), na.rm = TRUE) else NA_real_
+  )
+}
+
 #' Fit a beta-binomial logistic regression via TMB
 #'
 #' Model
@@ -29,10 +79,6 @@ BBreg <- function(formula, m, data = list(),
                   maxiter = 100, control = list(), silent = TRUE,
                   chains = 2L, iter = 1000L, warmup = 400L, seed = 1L) {
   method <- match.arg(method)
-  if (any(m != as.integer(m)) || min(m) <= 0) {
-    stop("m must be positive integer(s)", call. = FALSE)
-  }
-
   empty_data <- is.null(data) || (is.list(data) && !is.data.frame(data) && !length(data))
   if (!empty_data) data <- as.data.frame(data)
 
@@ -45,6 +91,8 @@ BBreg <- function(formula, m, data = list(),
   }
   X <- model.matrix(attr(mf, "terms"), data = mf)
   y <- as.numeric(model.response(mf))
+  validated <- .validate_bb_inputs(y = y, m = m, X = X, context = "BBreg")
+  y <- validated$y
   n <- length(y)
   X <- .merge_X_null(X, sm$X_null)
   if (isTRUE(sm$n_smooth > 0L)) {
@@ -63,8 +111,9 @@ BBreg <- function(formula, m, data = list(),
     balanced <- if (length(unique(m.)) == 1L) "yes" else "no"
   }
 
-  if (any(y != as.integer(y))) stop("y must be integer", call. = FALSE)
-  if (any(y < 0 | y > m.)) stop("y must be bounded between 0 and m", call. = FALSE)
+  validated <- .validate_bb_inputs(y = y, m = m., X = X, context = "BBreg")
+  y <- validated$y
+  m. <- validated$m
 
   if (identical(method, "bayes") && sm$n_smooth > 0L) {
     stop('method = "bayes" does not support s() smooths yet', call. = FALSE)
@@ -117,6 +166,7 @@ BBreg <- function(formula, m, data = list(),
   }
 
   conv <- if (opt$convergence == 0) "yes" else "no"
+  diagnostics <- .bbreg_diagnostics(opt, obj)
   sdr <- tryCatch(
     TMB::sdreport(obj, getJointPrecision = sm$n_smooth > 0L),
     error = function(e) NULL
@@ -206,6 +256,7 @@ BBreg <- function(formula, m, data = list(),
     psi = log_phi,
     psi.var = psi.var,
     conv = conv,
+    diagnostics = diagnostics,
     fitted.values = fitted.values,
     deviance = deviance,
     df = df,

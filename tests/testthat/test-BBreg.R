@@ -44,3 +44,15 @@ test_that("BBreg close to PROreg::BBreg", {
                tolerance = 0.05)
   expect_equal(fit_tmb$phi, fit_old$phi, tolerance = 0.1)
 })
+
+test_that(".validate_bb_inputs enforces sensible bounds", {
+  X <- matrix(1, nrow = 3L, ncol = 1L)
+  expect_error(
+    .validate_bb_inputs(y = c(1, 2, 3), m = c(2, 2), X = X, context = "BBreg"),
+    "m must be scalar or length\\(y\\)"
+  )
+  expect_error(
+    .validate_bb_inputs(y = c(1, 2, 4), m = c(3, 3, 3), X = X, context = "BBreg"),
+    "y must be bounded between 0 and m"
+  )
+})
